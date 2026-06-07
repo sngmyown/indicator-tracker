@@ -1,0 +1,80 @@
+{
+  "week": "manual-init",
+  "updatedAt": "2026-06-06T00:00:00+09:00",
+  "freshnessStatus": "manual-init",
+  "marketSummary": {
+    "riskMode": "neutral",
+    "positiveAxes": 0,
+    "neutralAxes": 8,
+    "negativeAxes": 0
+  },
+  "axes": [
+    {
+      "id": "rates",
+      "name": "금리 / 유동성",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "earnings",
+      "name": "기업 실적 / 가이던스",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "flows",
+      "name": "자금 흐름",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "employment",
+      "name": "고용",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "consumption",
+      "name": "소비 / 수요",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "margins",
+      "name": "기업 마진 구조",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "dollar-commodities",
+      "name": "달러 / 원자재",
+      "status": "neutral",
+      "summary": "초기 데이터입니다.",
+      "indicators": []
+    },
+    {
+      "id": "volatility",
+      "name": "변동성 / VIX",
+      "status": "neutral",
+      "summary": "VIX와 Fear & Greed Index를 함께 확인합니다.",
+      "indicators": []
+    }
+  ],
+  "todo": {
+    "title": "금요일 / 토요일 직접 운용 To do list",
+    "items": [
+      "이번 주 8축 중 긍정 / 중립 / 부정 축 분류",
+      "부정 축이 5개 이상이면 현금 확보 검토",
+      "현재 시장 시나리오 선택",
+      "포트폴리오 비중 점검",
+      "다음 주 종목 발굴 프롬프트 실행 여부 결정",
+      "이번 주 원칙 위반 여부 점검"
+    ]
+  }
+}
