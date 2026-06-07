@@ -63,7 +63,30 @@
       "name": "변동성 / VIX",
       "status": "neutral",
       "summary": "VIX와 Fear & Greed Index를 함께 확인합니다.",
-      "indicators": []
+      "indicators": [
+        {
+          "name": "VIX",
+          "expectedChecked": false,
+          "previous": null,
+          "actual": null,
+          "actualDate": null,
+          "marketReaction": "자동 업데이트 전 초기값입니다.",
+          "interpretation": "VIX 자동 업데이트 실행 후 FRED VIXCLS 값으로 교체됩니다.",
+          "signal": "neutral",
+          "source": "manual"
+        },
+        {
+          "name": "Fear & Greed Index",
+          "expectedChecked": false,
+          "previous": null,
+          "actual": null,
+          "actualDate": null,
+          "marketReaction": "자동 업데이트 전 초기값입니다.",
+          "interpretation": "Fear & Greed 자동 업데이트 실행 후 CNN Fear & Greed Index 값으로 교체됩니다.",
+          "signal": "neutral",
+          "source": "manual"
+        }
+      ]
     }
   ],
   "todo": {
