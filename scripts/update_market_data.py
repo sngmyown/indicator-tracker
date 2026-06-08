@@ -1,7 +1,7 @@
 import csv
 import json
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,181 +9,203 @@ from zoneinfo import ZoneInfo
 DATA_PATH = Path("data/latest.json")
 KST = ZoneInfo("Asia/Seoul")
 FRED_VIX_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"
-CNN_FEAR_GREED_URLS = [
-    "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
-    "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/2020-09-18"
+
+AXES_TEMPLATE = [
+    ("rates", "금리 / 유동성"),
+    ("earnings", "기업 실적 / 가이던스"),
+    ("flows", "자금 흐름"),
+    ("employment", "고용"),
+    ("consumption", "소비 / 수요"),
+    ("margins", "기업 마진 구조"),
+    ("dollar-commodities", "달러 / 원자재"),
+    ("volatility", "변동성 / VIX")
 ]
 
+
 def fetch_text(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json,text/csv,text/plain,*/*"})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/csv,text/plain,*/*"
+        }
+    )
+
     with urllib.request.urlopen(request, timeout=25) as response:
         return response.read().decode("utf-8")
 
+
 def fetch_vix():
-    reader = csv.DictReader(StringIO(fetch_text(FRED_VIX_CSV_URL)))
+    csv_text = fetch_text(FRED_VIX_CSV_URL)
+    reader = csv.DictReader(StringIO(csv_text))
     values = []
+
     for row in reader:
         raw_date = row.get("observation_date")
         raw_value = row.get("VIXCLS")
+
         if not raw_date or not raw_value:
             continue
+
         raw_value = raw_value.strip()
+
         if raw_value == ".":
             continue
-        values.append({"date": raw_date, "value": round(float(raw_value), 2)})
+
+        values.append({
+            "date": raw_date,
+            "value": round(float(raw_value), 2)
+        })
+
     if len(values) < 2:
-        raise ValueError("VIX 유효 데이터가 2개 미만입니다.")
+        raise ValueError("FRED VIXCLS에서 유효한 VIX 데이터가 2개 미만입니다.")
+
     return values[-1], values[-2]
 
-def first_number(*values):
-    for value in values:
-        if isinstance(value, (int, float)):
-            return round(float(value), 2)
-        if isinstance(value, str):
-            value = value.strip()
-            if not value:
-                continue
-            try:
-                return round(float(value), 2)
-            except ValueError:
-                continue
-    return None
-
-def parse_timestamp_to_date(raw_timestamp):
-    if raw_timestamp is None:
-        return None
-    if isinstance(raw_timestamp, (int, float)):
-        timestamp = float(raw_timestamp)
-        if timestamp > 1_000_000_000_000:
-            timestamp /= 1000
-        return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
-    if isinstance(raw_timestamp, str):
-        text = raw_timestamp.strip()
-        if not text:
-            return None
-        if text.isdigit():
-            timestamp = float(text)
-            if timestamp > 1_000_000_000_000:
-                timestamp /= 1000
-            return datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
-        return text[:10]
-    return None
-
-def fetch_fear_greed():
-    last_error = None
-    for url in CNN_FEAR_GREED_URLS:
-        try:
-            payload = json.loads(fetch_text(url))
-            fg = payload.get("fear_and_greed", {})
-            hist = payload.get("fear_and_greed_historical", {})
-            hist_data = hist.get("data", []) if isinstance(hist, dict) else []
-            actual = first_number(fg.get("score"), fg.get("value"), fg.get("y"))
-            actual_date = parse_timestamp_to_date(fg.get("timestamp") or fg.get("time") or fg.get("date"))
-            previous = first_number(fg.get("previous_close"), fg.get("previousClose"), fg.get("previous"))
-            if previous is None and len(hist_data) >= 2:
-                previous = first_number(hist_data[-2].get("y"), hist_data[-2].get("score"), hist_data[-2].get("value"))
-            if actual_date is None and hist_data:
-                actual_date = parse_timestamp_to_date(hist_data[-1].get("x") or hist_data[-1].get("timestamp") or hist_data[-1].get("date"))
-            if actual is None:
-                raise ValueError("Fear & Greed actual 값을 찾지 못했습니다.")
-            return {"actual": actual, "previous": previous, "actualDate": actual_date, "sourceUrl": url}
-        except Exception as error:
-            last_error = error
-    raise RuntimeError(f"Fear & Greed 데이터를 가져오지 못했습니다: {last_error}")
 
 def get_vix_signal(vix):
     if vix <= 10:
-        return "slightly_negative"
+        return "warning-low-volatility"
     if vix <= 20:
         return "positive"
     if vix < 30:
         return "neutral"
     return "negative"
 
-def get_fear_greed_signal(score):
-    if score <= 24:
-        return "negative"
-    if score <= 44:
-        return "slightly_negative"
-    if score <= 55:
-        return "neutral"
-    if score <= 75:
-        return "positive"
-    return "slightly_negative"
 
-def get_axis_status(vix_signal, fg_signal):
-    if vix_signal == "negative":
-        return "negative"
-    if vix_signal == "positive" and fg_signal == "positive":
+def get_axis_status(signal):
+    if signal == "positive":
         return "positive"
-    if vix_signal in {"negative", "slightly_negative"} and fg_signal in {"negative", "slightly_negative"}:
+    if signal == "negative":
         return "negative"
     return "neutral"
 
-def get_fear_greed_label(score):
-    if score <= 24:
-        return "Extreme Fear"
-    if score <= 44:
-        return "Fear"
-    if score <= 55:
-        return "Neutral"
-    if score <= 75:
-        return "Greed"
-    return "Extreme Greed"
 
 def get_vix_interpretation(actual, previous):
     change = round(actual - previous, 2)
+
     if actual <= 10:
-        level = "VIX가 10 이하입니다. 시장은 매우 안정적으로 보이지만 단기 과열 가능성도 함께 점검해야 합니다."
+        level_text = "VIX가 10 이하입니다. 시장은 매우 안정적으로 보이지만, 과도한 안도감과 단기 과열 가능성도 함께 점검해야 합니다."
     elif actual <= 20:
-        level = "VIX가 정상 범위에 있습니다. 변동성 축은 스윙 매매에 비교적 우호적인 상태입니다."
+        level_text = "VIX가 정상 범위에 있습니다. 변동성 축은 스윙 매매에 비교적 우호적인 상태입니다."
     elif actual < 30:
-        level = "VIX가 20을 넘었습니다. 시장 긴장도가 올라온 상태이므로 포지션 크기와 손절 기준을 더 엄격히 봐야 합니다."
+        level_text = "VIX가 20을 넘었습니다. 시장 긴장도가 올라온 상태이므로 포지션 크기와 손절 기준을 더 엄격히 봐야 합니다."
     else:
-        level = "VIX가 30 이상입니다. 공포 구간이므로 신규 진입보다 리스크 관리와 현금 비중을 우선해야 합니다."
+        level_text = "VIX가 30 이상입니다. 공포 구간이므로 신규 진입보다 리스크 관리와 현금 비중을 우선해야 합니다."
+
     if change > 1:
-        return level + f" 전일 대비 {change}포인트 상승해 단기 긴장도가 높아졌습니다."
-    if change < -1:
-        return level + f" 전일 대비 {abs(change)}포인트 하락해 공포가 완화되었습니다."
-    return level + " 전일 대비 변화는 크지 않습니다."
-
-def get_fear_greed_interpretation(actual, previous):
-    label = get_fear_greed_label(actual)
-    level = f"Fear & Greed Index는 {actual}로 {label} 구간입니다."
-    if actual <= 24:
-        regime = " 시장 심리는 극단적 공포에 가깝습니다. 단기적으로는 방어가 우선이지만, 매도 압력 소진 여부를 함께 확인해야 합니다."
-    elif actual <= 44:
-        regime = " 시장 심리는 공포 쪽에 있습니다. 신규 진입은 가능하더라도 포지션 크기를 낮추고 확인 신호를 더 요구하는 편이 적절합니다."
-    elif actual <= 55:
-        regime = " 시장 심리는 중립권입니다. VIX, 금리, 자금 흐름과 함께 종합 판단해야 합니다."
-    elif actual <= 75:
-        regime = " 시장 심리는 탐욕 쪽에 있습니다. 리스크온 환경일 수 있지만, 추격 매수와 과열 신호를 경계해야 합니다."
+        change_text = f" 전일 대비 {change}포인트 상승해 단기 긴장도가 높아졌습니다."
+    elif change < -1:
+        change_text = f" 전일 대비 {abs(change)}포인트 하락해 공포가 완화되었습니다."
     else:
-        regime = " 시장 심리는 극단적 탐욕에 가깝습니다. 상승 추세가 강해도 신규 진입 손익비와 조정 위험을 엄격히 봐야 합니다."
-    if previous is None:
-        return level + regime
-    change = round(actual - previous, 2)
-    if change > 3:
-        return level + regime + f" 이전치 대비 {change}포인트 상승해 위험 선호가 강화됐습니다."
-    if change < -3:
-        return level + regime + f" 이전치 대비 {abs(change)}포인트 하락해 위험 회피 심리가 강해졌습니다."
-    return level + regime + " 이전치 대비 변화는 크지 않습니다."
+        change_text = " 전일 대비 변화는 크지 않습니다."
 
-def find_or_create_volatility_axis(data):
-    axes = data.setdefault("axes", [])
-    for axis in axes:
-        if axis.get("id") == "volatility":
+    return level_text + change_text
+
+
+def build_base_data():
+    return {
+        "week": "manual-init",
+        "updatedAt": "pending-auto-update",
+        "freshnessStatus": "pending-auto-update",
+        "marketSummary": {
+            "riskMode": "neutral",
+            "positiveAxes": 0,
+            "neutralAxes": 8,
+            "negativeAxes": 0
+        },
+        "axes": [
+            {
+                "id": axis_id,
+                "name": axis_name,
+                "status": "neutral",
+                "summary": "초기 데이터입니다." if axis_id != "volatility" else "VIX 자동 업데이트 대기 중입니다.",
+                "indicators": []
+            }
+            for axis_id, axis_name in AXES_TEMPLATE
+        ],
+        "todo": {
+            "title": "금요일 / 토요일 직접 운용 To do list",
+            "items": [
+                "이번 주 8축 중 긍정 / 중립 / 부정 축 분류",
+                "부정 축이 5개 이상이면 현금 확보 검토",
+                "현재 시장 시나리오 선택",
+                "포트폴리오 비중 점검",
+                "다음 주 종목 발굴 프롬프트 실행 여부 결정",
+                "이번 주 원칙 위반 여부 점검"
+            ]
+        }
+    }
+
+
+def load_data():
+    if not DATA_PATH.exists():
+        DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        return build_base_data()
+
+    try:
+        data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("data/latest.json JSON 형식이 깨져 있습니다.") from exc
+
+    if not isinstance(data, dict):
+        return build_base_data()
+
+    return normalize_base_data(data)
+
+
+def normalize_base_data(data):
+    base = build_base_data()
+
+    data.setdefault("week", base["week"])
+    data.setdefault("updatedAt", base["updatedAt"])
+    data.setdefault("freshnessStatus", base["freshnessStatus"])
+    data.setdefault("marketSummary", base["marketSummary"])
+    data.setdefault("todo", base["todo"])
+
+    existing_axes = {
+        axis.get("id"): axis
+        for axis in data.get("axes", [])
+        if isinstance(axis, dict) and axis.get("id")
+    }
+
+    normalized_axes = []
+
+    for axis_id, axis_name in AXES_TEMPLATE:
+        existing = existing_axes.get(axis_id, {})
+        normalized_axes.append({
+            "id": axis_id,
+            "name": existing.get("name") or axis_name,
+            "status": existing.get("status") or "neutral",
+            "summary": existing.get("summary") or ("VIX 자동 업데이트 대기 중입니다." if axis_id == "volatility" else "초기 데이터입니다."),
+            "indicators": existing.get("indicators") if isinstance(existing.get("indicators"), list) else []
+        })
+
+    data["axes"] = normalized_axes
+    return data
+
+
+def find_axis(data, axis_id):
+    for axis in data["axes"]:
+        if axis["id"] == axis_id:
             return axis
-    axis = {"id": "volatility", "name": "변동성 / VIX", "status": "neutral", "summary": "VIX와 Fear & Greed Index를 함께 확인합니다.", "indicators": []}
-    axes.append(axis)
-    return axis
+
+    raise ValueError(f"{axis_id} 축을 찾지 못했습니다.")
+
 
 def replace_indicator(axis, indicator_name, indicator):
-    axis["indicators"] = [item for item in axis.setdefault("indicators", []) if item.get("name", "").strip().lower() != indicator_name.strip().lower()]
-    axis["indicators"].append(indicator)
+    cleaned = [
+        item for item in axis.get("indicators", [])
+        if item.get("name", "").strip().lower() != indicator_name.strip().lower()
+    ]
+
+    cleaned.insert(0, indicator)
+    axis["indicators"] = cleaned
+
 
 def count_axes(axes, status):
     return sum(1 for axis in axes if axis.get("status") == status)
+
 
 def determine_risk_mode(positive, neutral, negative):
     if negative >= 5:
@@ -192,46 +214,116 @@ def determine_risk_mode(positive, neutral, negative):
         return "risk-on"
     return "neutral"
 
+
 def update_market_summary(data):
     axes = data.get("axes", [])
+
     positive = count_axes(axes, "positive")
     neutral = count_axes(axes, "neutral")
     negative = count_axes(axes, "negative")
-    data["marketSummary"] = {"riskMode": determine_risk_mode(positive, neutral, negative), "positiveAxes": positive, "neutralAxes": neutral, "negativeAxes": negative}
+
+    data["marketSummary"] = {
+        "riskMode": determine_risk_mode(positive, neutral, negative),
+        "positiveAxes": positive,
+        "neutralAxes": neutral,
+        "negativeAxes": negative
+    }
+
+
+def assert_vix_indicator(indicator):
+    required_keys = [
+        "name",
+        "expectedChecked",
+        "previous",
+        "actual",
+        "actualDate",
+        "marketReaction",
+        "interpretation",
+        "signal",
+        "status",
+        "source",
+        "sourceSeries",
+        "sourceUrl"
+    ]
+
+    for key in required_keys:
+        if key not in indicator:
+            raise ValueError(f"VIX indicator에 {key} 키가 없습니다.")
+
+    if not isinstance(indicator["actual"], (int, float)):
+        raise ValueError("VIX actual 값이 숫자가 아닙니다.")
+
+    if not isinstance(indicator["previous"], (int, float)):
+        raise ValueError("VIX previous 값이 숫자가 아닙니다.")
+
+    if indicator["source"] != "FRED":
+        raise ValueError("VIX source가 FRED가 아닙니다.")
+
+    if indicator["sourceSeries"] != "VIXCLS":
+        raise ValueError("VIX sourceSeries가 VIXCLS가 아닙니다.")
+
+    if indicator["status"] not in {"positive", "neutral", "negative", "warning-low-volatility"}:
+        raise ValueError("VIX status 값이 허용 범위를 벗어났습니다.")
+
+    for key, value in indicator.items():
+        if value is None:
+            raise ValueError(f"VIX indicator의 {key} 값이 null입니다.")
+
 
 def main():
-    if not DATA_PATH.exists():
-        raise FileNotFoundError("data/latest.json 파일을 찾지 못했습니다.")
-    data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    data = load_data()
+
     latest_vix, previous_vix = fetch_vix()
-    fear_greed = fetch_fear_greed()
-    vix_actual = latest_vix["value"]
-    vix_previous = previous_vix["value"]
-    vix_signal = get_vix_signal(vix_actual)
-    fg_actual = fear_greed["actual"]
-    fg_previous = fear_greed["previous"]
-    fg_signal = get_fear_greed_signal(fg_actual)
-    vol = find_or_create_volatility_axis(data)
-    vol["status"] = get_axis_status(vix_signal, fg_signal)
-    vol["summary"] = f"VIX 최신값은 {vix_actual}, Fear & Greed Index 최신값은 {fg_actual}입니다."
-    vix_indicator = {"name": "VIX", "expectedChecked": False, "previous": vix_previous, "actual": vix_actual, "actualDate": latest_vix["date"], "marketReaction": "이번 단계에서는 VIX와 Fear & Greed 값을 자동 반영합니다. S&P 500, Nasdaq, 10년물 금리 반응은 다음 확장 단계에서 연결합니다.", "interpretation": get_vix_interpretation(vix_actual, vix_previous), "signal": vix_signal, "source": "FRED VIXCLS"}
-    fg_indicator = {"name": "Fear & Greed Index", "expectedChecked": False, "previous": fg_previous, "actual": fg_actual, "actualDate": fear_greed["actualDate"], "marketReaction": "이번 단계에서는 Fear & Greed 값만 자동 반영합니다. 주요 지수와 금리의 시장 반응 연결은 다음 확장 단계에서 처리합니다.", "interpretation": get_fear_greed_interpretation(fg_actual, fg_previous), "signal": fg_signal, "source": "CNN Fear & Greed Index"}
-    replace_indicator(vol, "VIX", vix_indicator)
-    replace_indicator(vol, "Fear & Greed Index", fg_indicator)
-    if vix_indicator["actual"] is None:
-        raise ValueError("VIX actual 값이 None입니다.")
-    if fg_indicator["actual"] is None:
-        raise ValueError("Fear & Greed actual 값이 None입니다.")
+
+    actual = latest_vix["value"]
+    previous = previous_vix["value"]
+    signal = get_vix_signal(actual)
+    axis_status = get_axis_status(signal)
+
+    vix_indicator = {
+        "name": "VIX",
+        "expectedChecked": False,
+        "previous": previous,
+        "actual": actual,
+        "actualDate": latest_vix["date"],
+        "marketReaction": "이번 단계에서는 VIX 값만 자동 반영합니다. S&P 500, Nasdaq, 10년물 금리 반응은 다음 확장 단계에서 연결합니다.",
+        "interpretation": get_vix_interpretation(actual, previous),
+        "signal": signal,
+        "status": signal,
+        "source": "FRED",
+        "sourceSeries": "VIXCLS",
+        "sourceUrl": FRED_VIX_CSV_URL
+    }
+
+    assert_vix_indicator(vix_indicator)
+
+    volatility_axis = find_axis(data, "volatility")
+    volatility_axis["status"] = axis_status
+    volatility_axis["summary"] = f"VIX 최신값은 {actual}입니다. 데이터 출처는 FRED VIXCLS입니다."
+    replace_indicator(volatility_axis, "VIX", vix_indicator)
+
     now = datetime.now(KST)
+
     data["week"] = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
     data["updatedAt"] = now.isoformat(timespec="seconds")
-    data["freshnessStatus"] = "vix-fear-greed-auto-update-ok"
-    data["automation"] = {"lastRunAt": now.isoformat(timespec="seconds"), "stage": "vix-fear-greed-auto-update", "note": "VIX와 Fear & Greed Index 자동 업데이트 완료."}
+    data["freshnessStatus"] = "vix-auto-update-ok"
+    data["automation"] = {
+        "lastRunAt": now.isoformat(timespec="seconds"),
+        "stage": "vix-auto-update",
+        "note": "VIX 자동 업데이트 완료. null/manual VIX 값은 허용하지 않습니다."
+    }
+
     update_market_summary(data)
-    DATA_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print("VIX and Fear & Greed update completed")
+
+    DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATA_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8"
+    )
+
+    print("VIX update completed")
     print(json.dumps(vix_indicator, ensure_ascii=False, indent=2))
-    print(json.dumps(fg_indicator, ensure_ascii=False, indent=2))
+
 
 if __name__ == "__main__":
     main()
