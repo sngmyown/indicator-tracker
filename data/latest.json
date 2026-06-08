@@ -58,14 +58,28 @@
       "summary": "초기 데이터입니다.",
       "indicators": []
     },
+   {
+  "id": "volatility",
+  "name": "변동성 / VIX",
+  "status": "positive",
+  "summary": "VIX 최신값을 기준으로 시장 변동성과 공포 수준을 확인합니다.",
+  "indicators": [
     {
-      "id": "volatility",
-      "name": "변동성 / VIX",
-      "status": "neutral",
-      "summary": "VIX 자동 업데이트 대기 중입니다.",
-      "indicators": []
+      "name": "VIX",
+      "expectedChecked": false,
+      "previous": 17.25,
+      "actual": 16.88,
+      "actualDate": "2026-06-05",
+      "marketReaction": "수동 입력 테스트입니다. 자동 업데이트 연결 전 VIX 표시 구조를 검증합니다.",
+      "interpretation": "VIX가 15~20 전후의 정상 범위에 있습니다. 변동성 축은 스윙 매매에 비교적 우호적인 상태로 해석할 수 있습니다.",
+      "signal": "positive",
+      "status": "positive",
+      "source": "FRED",
+      "sourceSeries": "VIXCLS",
+      "sourceUrl": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS"
     }
-  ],
+  ]
+}
   "todo": {
     "title": "금요일 / 토요일 직접 운용 To do list",
     "items": [
