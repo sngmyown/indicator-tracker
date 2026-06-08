@@ -24,26 +24,40 @@ jobs:
       - name: Update latest market data
         run: python scripts/update_market_data.py
 
-      - name: Verify updated data
+      - name: Verify VIX data
         run: |
-          echo "Source markers in data/latest.json:"
-          grep -n "FRED VIXCLS\|CNN Fear" data/latest.json || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-          echo "Actual fields in data/latest.json:"
-          grep -n '"actual"' data/latest.json || true
+          path = Path("data/latest.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
 
-          echo "Freshness status:"
-          grep -n '"freshnessStatus"' data/latest.json || true
+          volatility = next(
+              axis for axis in data["axes"]
+              if axis["id"] == "volatility"
+          )
 
-          if ! grep -q "FRED VIXCLS" data/latest.json; then
-            echo "ERROR: FRED VIXCLS was not written to data/latest.json"
-            exit 1
-          fi
+          vix = next(
+              indicator for indicator in volatility["indicators"]
+              if indicator["name"] == "VIX"
+          )
 
-          if ! grep -q "CNN Fear & Greed Index" data/latest.json; then
-            echo "ERROR: CNN Fear & Greed Index was not written to data/latest.json"
-            exit 1
-          fi
+          assert isinstance(vix["actual"], (int, float)), "VIX actual is not numeric"
+          assert isinstance(vix["previous"], (int, float)), "VIX previous is not numeric"
+          assert vix["actualDate"], "VIX actualDate is missing"
+          assert vix["source"] == "FRED", "VIX source is not FRED"
+          assert vix["sourceSeries"] == "VIXCLS", "VIX sourceSeries is not VIXCLS"
+          assert vix["status"] in {"positive", "neutral", "negative", "warning-low-volatility"}, "VIX status is invalid"
+
+          for key, value in vix.items():
+              assert value is not None, f"VIX {key} is null"
+
+          assert data["freshnessStatus"] == "vix-auto-update-ok", "freshnessStatus was not updated"
+
+          print("Verified VIX data:")
+          print(json.dumps(vix, ensure_ascii=False, indent=2))
+          PY
 
       - name: Commit updated data
         run: |
@@ -55,6 +69,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No staged changes to commit."
           else
-            git commit -m "Update market dashboard data"
+            git commit -m "Update VIX market data"
             git push
           fi
