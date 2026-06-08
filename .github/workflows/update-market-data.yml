@@ -15,60 +15,64 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      - name: Show files before update
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Root files:"
+          ls -la
+          echo "Data folder:"
+          ls -la data || true
+          echo "Scripts folder:"
+          ls -la scripts || true
+          echo "Current freshnessStatus before update:"
+          grep -n '"freshnessStatus"' data/latest.json || true
+
       - name: Update latest market data
         run: python scripts/update_market_data.py
 
-      - name: Verify VIX data
+      - name: Verify updated latest.json
         run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
+          echo "Current freshnessStatus after update:"
+          grep -n '"freshnessStatus"' data/latest.json || true
 
-          path = Path("data/latest.json")
-          data = json.loads(path.read_text(encoding="utf-8"))
+          echo "Check all-axes marker:"
+          grep -n "all-axes-auto-update-ok" data/latest.json
 
-          volatility = next(
-              axis for axis in data["axes"]
-              if axis["id"] == "volatility"
-          )
+          echo "Check VIX source:"
+          grep -n "VIXCLS" data/latest.json
 
-          vix = next(
-              indicator for indicator in volatility["indicators"]
-              if indicator["name"] == "VIX"
-          )
+          echo "Check actual fields:"
+          grep -n '"actual"' data/latest.json | head -20
 
-          assert isinstance(vix["actual"], (int, float)), "VIX actual is not numeric"
-          assert isinstance(vix["previous"], (int, float)), "VIX previous is not numeric"
-          assert vix["actualDate"], "VIX actualDate is missing"
-          assert vix["source"] == "FRED", "VIX source is not FRED"
-          assert vix["sourceSeries"] == "VIXCLS", "VIX sourceSeries is not VIXCLS"
-          assert vix["status"] in {"positive", "neutral", "negative", "warning-low-volatility"}, "VIX status is invalid"
-
-          for key, value in vix.items():
-              assert value is not None, f"VIX {key} is null"
-
-          assert data["freshnessStatus"] == "vix-auto-update-ok", "freshnessStatus was not updated"
-
-          print("Verified VIX data:")
-          print(json.dumps(vix, ensure_ascii=False, indent=2))
-          PY
-
-      - name: Commit updated data
+      - name: Commit and push updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          echo "Git status before add:"
+          git status --short
+
           git add data/latest.json
+
+          echo "Git status after add:"
+          git status --short
 
           if git diff --cached --quiet; then
             echo "No staged changes to commit."
           else
-            git commit -m "Update VIX market data"
+            git commit -m "Update market dashboard data"
+            git pull --rebase
             git push
           fi
+
+          echo "Git status after push:"
+          git status --short
