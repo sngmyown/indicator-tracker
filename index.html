@@ -1,72 +1,90 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
-  <title>8축 시장 대시보드</title>
-  <link rel="stylesheet" href="styles.css?v=2" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>시장 8축 대시보드 v1</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="container">
-    <section class="hero">
-      <p class="eyebrow">8-Axis Weekly Market Dashboard</p>
-      <h1>8축 시장 대시보드</h1>
-      <p class="description">
-        금리/유동성, 기업 실적, 자금 흐름, 고용, 소비, 마진, 달러/원자재, 변동성/VIX를 매주 추적합니다.
-        9번 종합 판단은 금요일 또는 토요일 직접 운용하는 To do list로 분리했습니다.
-      </p>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">8-Axis Market Signal Dashboard</p>
+      <h1>시장 8축 자동 업데이트 대시보드</h1>
+      <p class="subtitle">시장은 맞추는 게임이 아니라, 신호를 읽고 구간별로 대응하는 게임이다.</p>
+    </div>
+    <div class="meta-panel" id="metaPanel">데이터 로딩 중...</div>
+  </header>
 
-      <div class="freshness">
-        <span>마지막 데이터 업데이트</span>
-        <strong id="updatedAt">불러오는 중</strong>
+  <main>
+    <section class="warning hidden" id="dataWarning"></section>
+
+    <nav class="view-tabs" aria-label="대시보드 보기 전환">
+      <button class="tab active" data-view="overview">종합 대시보드</button>
+      <button class="tab" data-view="axes">8축 보기</button>
+      <button class="tab" data-view="timing">선행/동행/후행</button>
+      <button class="tab" data-view="matrix">매트릭스</button>
+      <button class="tab" data-view="indicators">지표 상세</button>
+      <button class="tab" data-view="todo">To do</button>
+    </nav>
+
+    <section class="view active" id="overviewView">
+      <div class="summary-grid" id="summaryGrid"></div>
+      <div class="section-card">
+        <div class="section-head">
+          <h2>시장 해석 요약</h2>
+        </div>
+        <p id="marketNarrative" class="narrative"></p>
+        <p id="conflictNarrative" class="muted"></p>
       </div>
-
-      <div id="staleWarning" class="warning hidden">
-        데이터가 오래되었습니다. GitHub Actions 자동 업데이트 상태를 확인하세요.
-      </div>
-
-      <button id="refreshButton" type="button">최신 데이터 다시 불러오기</button>
     </section>
 
-    <section class="summary-grid">
-      <article class="summary-card">
-        <span>시장 모드</span>
-        <strong id="riskMode">-</strong>
-      </article>
-      <article class="summary-card">
-        <span>긍정 축</span>
-        <strong id="positiveAxes">-</strong>
-      </article>
-      <article class="summary-card">
-        <span>중립 축</span>
-        <strong id="neutralAxes">-</strong>
-      </article>
-      <article class="summary-card">
-        <span>부정 축</span>
-        <strong id="negativeAxes">-</strong>
-      </article>
+    <section class="view" id="axesView">
+      <div class="section-head">
+        <h2>8축 보기</h2>
+        <p>각 축의 선행·동행·후행 신호와 핵심 지표를 함께 봅니다.</p>
+      </div>
+      <div class="axis-grid" id="axisGrid"></div>
     </section>
 
-    <section class="section">
-      <div class="section-heading">
-        <h2>8축 시장 체크</h2>
-        <p>각 축은 expected / previous / actual / reaction / interpretation 구조로 표시됩니다.</p>
+    <section class="view" id="timingView">
+      <div class="section-head">
+        <h2>선행 / 동행 / 후행 보기</h2>
+        <p>시장이 어느 시간대의 신호부터 움직이고 있는지 확인합니다.</p>
       </div>
-      <div id="axesGrid" class="axes-grid"></div>
+      <div class="timing-grid" id="timingGrid"></div>
     </section>
 
-    <section class="todo-section">
-      <div class="section-heading">
-        <h2 id="todoTitle">금요일 / 토요일 직접 운용 To do list</h2>
-        <p>이 영역은 자동 판단이 아니라 사용자가 직접 시장 시나리오와 포트폴리오 액션을 결정하는 운영 축입니다.</p>
+    <section class="view" id="matrixView">
+      <div class="section-head">
+        <h2>8축 × 시간성 매트릭스</h2>
+        <p>축과 시간성을 동시에 보는 시장 국면 판정기입니다.</p>
       </div>
-      <ul id="todoList"></ul>
+      <div class="table-wrap">
+        <table id="matrixTable"></table>
+      </div>
+    </section>
+
+    <section class="view" id="indicatorsView">
+      <div class="section-head split">
+        <div>
+          <h2>지표 상세 설명</h2>
+          <p>각 지표의 의미, 기준, 해석, 포트폴리오 액션을 확인합니다.</p>
+        </div>
+        <input id="indicatorSearch" type="search" placeholder="지표명, 축, source 검색" />
+      </div>
+      <div class="indicator-list" id="indicatorList"></div>
+    </section>
+
+    <section class="view" id="todoView">
+      <div class="section-head">
+        <h2>금요일 / 토요일 직접 운용 To do list</h2>
+        <p>자동화하지 않고 사용자가 직접 판단해야 하는 항목입니다.</p>
+      </div>
+      <div class="todo-list" id="todoList"></div>
     </section>
   </main>
 
-  <script src="app.js?v=2"></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
