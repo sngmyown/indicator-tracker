@@ -1,59 +1,61 @@
 {
   "schemaVersion": "1.0.0",
   "meta": {
-    "updatedAt": "2026-06-13T00:00:00+09:00",
+    "updatedAt": "2026-06-13T19:43:13+09:00",
     "week": "2026-W24",
     "timezone": "Asia/Seoul",
     "dataStatus": "partial",
-    "automationStatus": "v1-schema-ready",
+    "automationStatus": "pipeline-test-ok",
     "sourceMode": "mixed",
     "notes": [
-      "v1 스키마 초기 파일입니다.",
-      "A/B등급 지표는 update_market_data.py 실행 후 자동 값으로 갱신됩니다.",
-      "C등급 지표는 수동 확인 지표로 유지됩니다."
+      "파이프라인 검증용 업데이트입니다.",
+      "VIX에 테스트 값을 넣어 GitHub Actions commit/push가 가능한지 확인합니다.",
+      "실제 시장 데이터 자동화 코드는 다음 단계에서 다시 연결합니다."
     ]
   },
   "marketSummary": {
     "marketCondition": "neutral",
-    "marketConditionLabel": "자동 업데이트 대기 / 구조 점검 구간",
+    "marketConditionLabel": "파이프라인 검증 상태",
     "riskMode": "balanced",
-    "positiveAxes": 0,
-    "neutralAxes": 8,
+    "positiveAxes": 1,
+    "neutralAxes": 7,
     "negativeAxes": 0,
-    "leadingStatus": "warning",
-    "coincidentStatus": "warning",
+    "leadingStatus": "positive",
+    "coincidentStatus": "positive",
     "laggingStatus": "manual-required",
     "confidence": "low",
-    "summary": "v1 스키마 초기 상태입니다. 자동 업데이트 실행 후 A/B등급 지표의 실제 수치가 반영됩니다.",
+    "summary": "현재 값은 실제 시장 데이터가 아니라 GitHub Actions 파이프라인 검증용 테스트 값입니다.",
     "actionBias": "neutral-hold",
     "cashRatioGuide": "20~35%",
-    "strongAxes": [],
+    "strongAxes": [
+      "volatility"
+    ],
     "weakAxes": [],
     "watchAxes": [
       "rates",
       "employment",
       "volatility"
     ],
-    "conflictSummary": "아직 실제 수치가 연결되지 않아 축 간 충돌 판단은 대기 상태입니다."
+    "conflictSummary": "실제 데이터 연결 전이므로 축 간 충돌 판단은 보류합니다."
   },
   "timingSummary": {
     "leading": {
       "label": "선행지표",
-      "status": "warning",
+      "status": "positive",
       "score": 0,
       "positiveCount": 0,
       "neutralCount": 0,
       "negativeCount": 0,
-      "summary": "선행지표 자동 업데이트 대기 상태입니다."
+      "summary": "파이프라인 검증용 VIX 변화율이 반영되었습니다."
     },
     "coincident": {
       "label": "동행지표",
-      "status": "warning",
+      "status": "positive",
       "score": 0,
       "positiveCount": 0,
       "neutralCount": 0,
       "negativeCount": 0,
-      "summary": "동행지표 자동 업데이트 대기 상태입니다."
+      "summary": "파이프라인 검증용 VIX 현재값이 반영되었습니다."
     },
     "lagging": {
       "label": "후행지표",
@@ -197,14 +199,14 @@
     "volatility": {
       "order": 8,
       "name": "VIX / 변동성",
-      "status": "warning",
-      "score": 0,
-      "leadingStatus": "warning",
-      "coincidentStatus": "warning",
+      "status": "positive",
+      "score": 1,
+      "leadingStatus": "positive",
+      "coincidentStatus": "positive",
       "laggingStatus": "not-applicable",
-      "summary": "VIX와 VIX 변화율 자동 업데이트 대기 상태입니다.",
-      "interpretation": "VIX는 단기 위험과 공포의 가격입니다.",
-      "action": "VIX 급등 시 패닉인지 단기 바닥인지 다른 축과 함께 봅니다.",
+      "summary": "파이프라인 검증용으로 VIX 테스트 값이 자동 반영되었습니다.",
+      "interpretation": "이 값은 실제 시장 데이터가 아니라 GitHub Actions 검증용입니다.",
+      "action": "검증 성공 후 실제 FRED/Stooq 자동 수집 코드로 교체합니다.",
       "keyIndicators": [
         "vix",
         "vix_change_rate",
@@ -258,8 +260,8 @@
     },
     "volatility": {
       "axisName": "VIX / 변동성",
-      "leading": "warning",
-      "coincident": "warning",
+      "leading": "positive",
+      "coincident": "positive",
       "lagging": "not-applicable"
     }
   },
@@ -936,23 +938,23 @@
       "source": "FRED",
       "sourceSeries": "VIXCLS",
       "sourceUrl": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS",
-      "currentValue": "auto-pending",
-      "previousValue": "auto-pending",
+      "currentValue": 15.55,
+      "previousValue": 16.2,
       "unit": "index",
-      "actualDate": "auto-pending",
-      "direction": "not-available",
-      "change": "not-available",
-      "changePercent": "not-available",
-      "signal": "warning",
-      "score": 0,
+      "actualDate": "2026-06-13",
+      "direction": "down",
+      "change": -0.65,
+      "changePercent": -4.01,
+      "signal": "positive",
+      "score": 1,
       "meaning": "VIX는 단기 공포와 변동성의 가격입니다.",
       "positiveCondition": "10~20 정상 위험선호 구간",
       "neutralCondition": "20~30 긴장 상승",
       "negativeCondition": "30 이상 공포 구간",
-      "interpretation": "자동 업데이트 실행 전 대기 상태입니다.",
-      "marketReaction": "VIX 급등은 패닉과 단기 바닥 가능성을 동시에 봅니다.",
-      "action": "VIX 급등 시 추격 매도보다 시나리오 유효성을 점검합니다.",
-      "statusNote": "auto-pending"
+      "interpretation": "파이프라인 검증용 테스트 값입니다. GitHub Actions가 latest.json을 수정할 수 있는지 확인합니다.",
+      "marketReaction": "테스트 값입니다. 실제 시장 해석에는 사용하지 않습니다.",
+      "action": "자동 업데이트 파이프라인 검증 후 실제 데이터 수집 코드로 교체해야 합니다.",
+      "statusNote": "auto-updated"
     },
     {
       "id": "vix_change_rate",
@@ -966,23 +968,23 @@
       "source": "Derived",
       "sourceSeries": "VIXCLS-change",
       "sourceUrl": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=VIXCLS",
-      "currentValue": "auto-pending",
-      "previousValue": "auto-pending",
+      "currentValue": -4.01,
+      "previousValue": 0,
       "unit": "%",
-      "actualDate": "auto-pending",
-      "direction": "not-available",
-      "change": "not-available",
-      "changePercent": "not-available",
-      "signal": "warning",
-      "score": 0,
+      "actualDate": "2026-06-13",
+      "direction": "down",
+      "change": -4.01,
+      "changePercent": -4.01,
+      "signal": "positive",
+      "score": 1,
       "meaning": "VIX 변화율은 공포가 빠르게 확산되는지 보여줍니다.",
       "positiveCondition": "VIX 하락 또는 안정",
       "neutralCondition": "제한적 상승",
       "negativeCondition": "단기 급등",
-      "interpretation": "자동 업데이트 실행 전 대기 상태입니다.",
-      "marketReaction": "VIX가 서서히 상승하면 불안 누적, 급등하면 패닉 가능성입니다.",
-      "action": "변동성 확대 시 포지션 크기를 줄입니다.",
-      "statusNote": "auto-pending"
+      "interpretation": "파이프라인 검증용 테스트 값입니다. VIX 변화율 계산 구조를 확인합니다.",
+      "marketReaction": "테스트 값입니다. 실제 시장 해석에는 사용하지 않습니다.",
+      "action": "실제 데이터 연결 전까지 이 값은 검증용으로만 봅니다.",
+      "statusNote": "auto-updated"
     },
     {
       "id": "vix_futures_structure",
