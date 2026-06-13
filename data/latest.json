@@ -1,23 +1,24 @@
 {
   "schemaVersion": "1.0.0",
   "meta": {
-    "updatedAt": "2026-06-13T23:50:38+09:00",
+    "updatedAt": "2026-06-14T00:08:13+09:00",
     "week": "2026-W24",
     "timezone": "Asia/Seoul",
     "dataStatus": "partial",
-    "automationStatus": "vix-rates-update-v1",
+    "automationStatus": "vix-rates-employment-update-v1",
     "sourceMode": "mixed",
     "notes": [
-      "VIX fallback 자동 업데이트와 금리 2개 지표 자동 업데이트가 실행되었습니다.",
+      "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다.",
       "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
       "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
+      "신규 실업수당 청구건수는 FRED ICSA를 사용합니다.",
       "성공 시 auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
       "나머지 지표는 다음 단계에서 순차적으로 자동화합니다."
     ]
   },
   "marketSummary": {
     "marketCondition": "neutral",
-    "marketConditionLabel": "VIX + 금리 자동 업데이트 2단계",
+    "marketConditionLabel": "VIX + 금리 + 신규 실업수당 자동 업데이트 3단계",
     "riskMode": "balanced",
     "positiveAxes": 1,
     "neutralAxes": 7,
@@ -26,7 +27,7 @@
     "coincidentStatus": "positive",
     "laggingStatus": "manual-required",
     "confidence": "low",
-    "summary": "VIX와 2년물·10년물 금리 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
+    "summary": "VIX, 2년물·10년물 금리, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
     "actionBias": "neutral-hold",
     "cashRatioGuide": "20~35%",
     "strongAxes": [
@@ -35,20 +36,21 @@
     "weakAxes": [],
     "watchAxes": [
       "rates",
+      "employment",
       "flows",
       "volatility"
     ],
-    "conflictSummary": "현재는 변동성과 금리 축만 자동화된 상태이므로, 실적·자금흐름·고용·소비 축과의 연결 판단은 다음 단계에서 확장합니다."
+    "conflictSummary": "현재는 변동성·금리·고용 선행 신호만 자동화된 상태입니다. 실적·자금흐름·소비·마진·달러/원자재 축과의 연결 판단은 다음 단계에서 확장합니다."
   },
   "timingSummary": {
     "leading": {
       "label": "선행지표",
-      "status": "positive",
+      "status": "source-error",
       "score": 0,
       "positiveCount": 0,
       "neutralCount": 0,
       "negativeCount": 0,
-      "summary": "VIX 변화율은 -9.05%입니다. 변동성 확산 여부를 확인합니다."
+      "summary": "신규 실업수당 청구건수는 source-error, 전주 대비 source-error입니다. 고용 냉각의 초기 신호를 확인합니다."
     },
     "coincident": {
       "label": "동행지표",
@@ -128,14 +130,14 @@
     "employment": {
       "order": 4,
       "name": "고용 / 경기 사이클",
-      "status": "warning",
+      "status": "source-error",
       "score": 0,
-      "leadingStatus": "warning",
+      "leadingStatus": "source-error",
       "coincidentStatus": "warning",
       "laggingStatus": "warning",
-      "summary": "고용 축은 신규 실업수당, NFP, 실업률 자동 업데이트 대기 상태입니다.",
-      "interpretation": "고용은 경제 체력이지만 실업률은 후행성이 강합니다.",
-      "action": "신규 실업수당이 먼저 악화되는지 확인합니다.",
+      "summary": "신규 실업수당 청구건수는 source-error, 전주 대비 source-error입니다.",
+      "interpretation": "고용 축에서는 신규 실업수당이 실업률보다 먼저 흔들릴 수 있는 선행 신호입니다. 단일 주간 수치보다 3~4주 방향성이 더 중요합니다.",
+      "action": "청구건수 상승이 반복되면 고용 냉각 시나리오를 강화하고, NFP·실업률·임금 상승률을 함께 확인합니다.",
       "keyIndicators": [
         "initial_claims",
         "nonfarm_payrolls",
@@ -238,7 +240,7 @@
     },
     "employment": {
       "axisName": "고용 / 경기 사이클",
-      "leading": "warning",
+      "leading": "source-error",
       "coincident": "warning",
       "lagging": "warning"
     },
@@ -550,23 +552,23 @@
       "source": "FRED",
       "sourceSeries": "ICSA",
       "sourceUrl": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA",
-      "currentValue": "auto-pending",
-      "previousValue": "auto-pending",
+      "currentValue": "source-error",
+      "previousValue": "source-error",
       "unit": "건",
-      "actualDate": "auto-pending",
+      "actualDate": "2026-06-14",
       "direction": "not-available",
-      "change": "not-available",
-      "changePercent": "not-available",
-      "signal": "warning",
+      "change": "source-error",
+      "changePercent": "source-error",
+      "signal": "source-error",
       "score": 0,
       "meaning": "고용시장의 빠른 둔화 여부를 보는 주간 선행 신호입니다.",
       "positiveCondition": "20만~25만 건의 안정권",
       "neutralCondition": "25만~27.5만 건",
       "negativeCondition": "27.5만 건 이상 급증",
-      "interpretation": "자동 업데이트 실행 전 대기 상태입니다.",
-      "marketReaction": "청구건수 급증은 고용 둔화와 경기 방어 전환 신호입니다.",
-      "action": "고용 악화 시 경기민감주 비중 확대를 늦춥니다.",
-      "statusNote": "auto-pending"
+      "interpretation": "데이터 소스 호출에 실패했습니다. 오류: FRED: 데이터 호출 실패: https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA. 마지막 오류: The read operation timed out",
+      "marketReaction": "데이터 확인이 불가능하므로 시장 반응 해석을 보류합니다.",
+      "action": "GitHub Actions 로그와 데이터 소스 상태를 확인합니다.",
+      "statusNote": "source-error"
     },
     {
       "id": "unemployment_rate",
