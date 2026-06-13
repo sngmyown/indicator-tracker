@@ -362,6 +362,22 @@ def rate_signal(value, change):
     return "neutral", 0
 
 
+def initial_claims_signal(value, change):
+    """신규 실업수당 청구건수 해석 기준.
+
+    value는 FRED ICSA의 최신 청구건수입니다.
+    change는 직전 관측치 대비 증감입니다.
+    절대값과 변화 속도를 함께 봅니다.
+    """
+    if value >= 260000 or change >= 15000:
+        return "negative", -1
+
+    if value <= 230000 and change <= 5000:
+        return "positive", 1
+
+    return "neutral", 0
+
+
 def axis_status_from_score(score):
     if score > 0:
         return "positive"
@@ -630,6 +646,125 @@ def update_rates_summary(data, updates):
     })
 
 
+def fetch_initial_claims_with_fallback():
+    providers = [
+        ("FRED", lambda: fetch_fred_series("ICSA")),
+    ]
+
+    return fetch_with_fallback("initial_claims", providers)
+
+
+def update_employment(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+
+    item = find_indicator(data, "initial_claims")
+
+    try:
+        result = fetch_initial_claims_with_fallback()
+
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change = round(current_value - previous_value, 4)
+        signal, score = initial_claims_signal(current_value, change)
+
+        interpretation = f"신규 실업수당 청구건수 최신값은 {current_value:,.0f}건입니다. 데이터 출처는 {result['provider']}입니다. 절대 수준과 전주 대비 증가 속도를 함께 봅니다."
+        market_reaction = "청구건수가 빠르게 늘면 고용 냉각과 경기 둔화 가능성이 커집니다. 낮고 안정적인 청구건수는 소비와 기업 매출 체력에는 우호적입니다."
+        action = "청구건수가 악화되면 경기민감주와 고레버리지 성장주의 비중 확대를 늦추고, 실업률·NFP·임금 상승률과 함께 확인합니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+        )
+
+        update_employment_summary(data, {
+            "id": "initial_claims",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "change": info["change"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+        })
+        print("[update] initial_claims auto-updated", flush=True)
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        update_employment_summary(data, {
+            "id": "initial_claims",
+            "signal": "source-error",
+            "score": 0,
+            "value": "source-error",
+            "change": "source-error",
+            "date": today,
+            "provider": "source-error",
+        })
+        print("[update] initial_claims source-error", flush=True)
+
+
+def update_employment_summary(data, update):
+    signal = update["signal"]
+    score = update["score"]
+    status = "source-error" if signal == "source-error" else axis_status_from_score(score)
+
+    value = update["value"]
+    change = update["change"]
+
+    if isinstance(value, (int, float)):
+        value_text = f"{value:,.0f}건"
+    else:
+        value_text = str(value)
+
+    if isinstance(change, (int, float)):
+        change_text = f"{change:+,.0f}건"
+    else:
+        change_text = str(change)
+
+    data.setdefault("axisSummary", {})
+    if "employment" in data["axisSummary"]:
+        data["axisSummary"]["employment"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": signal,
+            "coincidentStatus": "warning",
+            "laggingStatus": "warning",
+            "summary": f"신규 실업수당 청구건수는 {value_text}, 전주 대비 {change_text}입니다.",
+            "interpretation": "고용 축에서는 신규 실업수당이 실업률보다 먼저 흔들릴 수 있는 선행 신호입니다. 단일 주간 수치보다 3~4주 방향성이 더 중요합니다.",
+            "action": "청구건수 상승이 반복되면 고용 냉각 시나리오를 강화하고, NFP·실업률·임금 상승률을 함께 확인합니다.",
+        })
+
+    data.setdefault("matrix", {})
+    if "employment" in data["matrix"]:
+        data["matrix"]["employment"].update({
+            "leading": signal,
+            "coincident": "warning",
+            "lagging": "warning",
+        })
+
+    data.setdefault("timingSummary", {})
+    if "leading" in data["timingSummary"]:
+        data["timingSummary"]["leading"].update({
+            "status": signal,
+            "summary": f"신규 실업수당 청구건수는 {value_text}, 전주 대비 {change_text}입니다. 고용 냉각의 초기 신호를 확인합니다.",
+        })
+
+    data.setdefault("marketSummary", {})
+    data["marketSummary"].update({
+        "marketCondition": "neutral",
+        "marketConditionLabel": "VIX + 금리 + 신규 실업수당 자동 업데이트 3단계",
+        "riskMode": "balanced",
+        "summary": "VIX, 2년물·10년물 금리, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
+        "conflictSummary": "현재는 변동성·금리·고용 선행 신호만 자동화된 상태입니다. 실적·자금흐름·소비·마진·달러/원자재 축과의 연결 판단은 다음 단계에서 확장합니다.",
+        "watchAxes": ["rates", "employment", "flows", "volatility"],
+    })
+
+
 def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date, provider):
     score = 0
 
@@ -712,12 +847,13 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-update-v1",
+        "automationStatus": "vix-rates-employment-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트와 금리 2개 지표 자동 업데이트가 실행되었습니다.",
+            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
+            "신규 실업수당 청구건수는 FRED ICSA를 사용합니다.",
             "성공 시 auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
@@ -738,7 +874,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates safe auto update", flush=True)
+    print("[start] VIX + rates + employment safe auto update", flush=True)
 
     data = load_data()
 
@@ -748,13 +884,14 @@ def main():
 
     update_vix(data)
     update_rates(data)
+    update_employment(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
 
-    print("[done] VIX + rates safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
