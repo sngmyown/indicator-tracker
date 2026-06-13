@@ -4,6 +4,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -15,10 +16,19 @@ KST = ZoneInfo("Asia/Seoul")
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=1mo&interval=1d"
 STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=%5Evix&i=d"
+TREASURY_YIELD_CURVE_BASE = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 
 
 def fred_url(series_id):
     return FRED_BASE + series_id
+
+
+def treasury_yield_curve_url(month_yyyymm):
+    query = urllib.parse.urlencode({
+        "data": "daily_treasury_yield_curve",
+        "field_tdr_date_value_month": month_yyyymm,
+    })
+    return f"{TREASURY_YIELD_CURVE_BASE}?{query}"
 
 
 def load_data():
@@ -63,7 +73,7 @@ def fetch_text(url, retries=1, timeout=8):
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0",
-                    "Accept": "text/csv,text/plain,application/json,*/*",
+                    "Accept": "text/csv,text/plain,application/json,application/xml,text/xml,*/*",
                     "Cache-Control": "no-cache",
                 },
             )
@@ -100,35 +110,40 @@ def latest_two_from_rows(rows, value_key="value"):
             continue
 
         valid_rows.append({
-            "date": str(date),
+            "date": str(date)[:10],
             "value": numeric,
         })
 
     if len(valid_rows) < 2:
         raise ValueError("유효 데이터가 2개 미만입니다.")
 
+    valid_rows.sort(key=lambda row: row["date"])
     return valid_rows[-1], valid_rows[-2]
 
 
-def fetch_fred_vix():
-    text = fetch_text(fred_url("VIXCLS"), retries=1, timeout=8)
+def fetch_fred_series(series_id):
+    text = fetch_text(fred_url(series_id), retries=1, timeout=8)
     reader = csv.DictReader(StringIO(text))
 
     rows = []
     for row in reader:
         rows.append({
             "date": row.get("observation_date"),
-            "value": row.get("VIXCLS"),
+            "value": row.get(series_id),
         })
 
     latest, previous = latest_two_from_rows(rows)
     return {
         "provider": "FRED",
-        "series": "VIXCLS",
-        "url": fred_url("VIXCLS"),
+        "series": series_id,
+        "url": fred_url(series_id),
         "latest": latest,
         "previous": previous,
     }
+
+
+def fetch_fred_vix():
+    return fetch_fred_series("VIXCLS")
 
 
 def fetch_yahoo_vix():
@@ -193,18 +208,105 @@ def fetch_vix_with_fallback():
         ("Stooq", fetch_stooq_vix),
     ]
 
+    return fetch_with_fallback("vix", providers)
+
+
+def month_candidates(months_back=4):
+    now = datetime.now(KST)
+    year = now.year
+    month = now.month
+    candidates = []
+
+    for _ in range(months_back):
+        candidates.append(f"{year}{month:02d}")
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+
+    return candidates
+
+
+def local_name(tag):
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def parse_treasury_yield_curve_xml(text):
+    root = ET.fromstring(text)
+    rows = []
+
+    for props in root.iter():
+        if local_name(props.tag) != "properties":
+            continue
+
+        row = {}
+        for child in list(props):
+            key = local_name(child.tag)
+            value = child.text
+            if value is not None:
+                row[key] = value.strip()
+
+        date = row.get("NEW_DATE") or row.get("NEWDATE") or row.get("Date")
+        if not date:
+            continue
+
+        rows.append({
+            "date": date[:10],
+            "BC_2YEAR": row.get("BC_2YEAR"),
+            "BC_10YEAR": row.get("BC_10YEAR"),
+        })
+
+    return rows
+
+
+def fetch_treasury_yield_curve(field_name):
+    errors = []
+
+    for month in month_candidates():
+        url = treasury_yield_curve_url(month)
+        try:
+            text = fetch_text(url, retries=1, timeout=8)
+            rows = parse_treasury_yield_curve_xml(text)
+            latest, previous = latest_two_from_rows(rows, value_key=field_name)
+            return {
+                "provider": "U.S. Treasury XML Feed",
+                "series": field_name,
+                "url": url,
+                "latest": latest,
+                "previous": previous,
+            }
+        except Exception as error:
+            message = f"Treasury {field_name} {month}: {error}"
+            errors.append(message)
+            print(f"[treasury] provider failed: {message}", flush=True)
+
+    raise RuntimeError(" | ".join(errors))
+
+
+def fetch_rate_with_fallback(rate_name, fred_series, treasury_field):
+    providers = [
+        ("FRED", lambda: fetch_fred_series(fred_series)),
+        ("U.S. Treasury XML Feed", lambda: fetch_treasury_yield_curve(treasury_field)),
+    ]
+
+    return fetch_with_fallback(rate_name, providers)
+
+
+def fetch_with_fallback(label, providers):
     errors = []
 
     for provider_name, fetcher in providers:
         try:
-            print(f"[vix] trying provider: {provider_name}", flush=True)
+            print(f"[{label}] trying provider: {provider_name}", flush=True)
             result = fetcher()
-            print(f"[vix] provider succeeded: {provider_name}", flush=True)
+            print(f"[{label}] provider succeeded: {provider_name}", flush=True)
             return result
         except Exception as error:
             message = f"{provider_name}: {error}"
             errors.append(message)
-            print(f"[vix] provider failed: {message}", flush=True)
+            print(f"[{label}] provider failed: {message}", flush=True)
 
     raise RuntimeError(" | ".join(errors))
 
@@ -250,6 +352,24 @@ def vix_change_signal(change_percent):
     return "neutral", 0
 
 
+def rate_signal(value, change):
+    if value >= 4.75 or change >= 0.15:
+        return "negative", -1
+
+    if value <= 4.0 or change <= -0.15:
+        return "positive", 1
+
+    return "neutral", 0
+
+
+def axis_status_from_score(score):
+    if score > 0:
+        return "positive"
+    if score < 0:
+        return "negative"
+    return "neutral"
+
+
 def mark_source_error(item, today, error_message):
     item.update({
         "currentValue": "source-error",
@@ -265,6 +385,44 @@ def mark_source_error(item, today, error_message):
         "action": "GitHub Actions 로그와 데이터 소스 상태를 확인합니다.",
         "statusNote": "source-error",
     })
+
+
+def update_indicator_success(item, result, signal, score, interpretation, market_reaction, action, status_note="auto-updated"):
+    latest = result["latest"]
+    previous = result["previous"]
+    current_value = latest["value"]
+    previous_value = previous["value"]
+    change = round(current_value - previous_value, 4)
+    change_percent = percent_change(current_value, previous_value)
+    direction = direction_from_change(change)
+
+    item.update({
+        "source": result["provider"],
+        "sourceSeries": result["series"],
+        "sourceUrl": result["url"],
+        "currentValue": current_value,
+        "previousValue": previous_value,
+        "actualDate": latest["date"],
+        "direction": direction,
+        "change": change,
+        "changePercent": change_percent,
+        "signal": signal,
+        "score": score,
+        "interpretation": interpretation,
+        "marketReaction": market_reaction,
+        "action": action,
+        "statusNote": status_note,
+    })
+
+    return {
+        "currentValue": current_value,
+        "previousValue": previous_value,
+        "change": change,
+        "changePercent": change_percent,
+        "direction": direction,
+        "actualDate": latest["date"],
+        "provider": result["provider"],
+    }
 
 
 def update_vix(data):
@@ -344,6 +502,134 @@ def update_vix(data):
         print("[update] VIX source-error", flush=True)
 
 
+def update_rates(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+
+    updates = []
+
+    rate_configs = [
+        {
+            "label": "us_2y_yield",
+            "indicator_id": "us_2y_yield",
+            "name": "미국 2년물 국채금리",
+            "fred_series": "DGS2",
+            "treasury_field": "BC_2YEAR",
+        },
+        {
+            "label": "us_10y_yield",
+            "indicator_id": "us_10y_yield",
+            "name": "미국 10년물 국채금리",
+            "fred_series": "DGS10",
+            "treasury_field": "BC_10YEAR",
+        },
+    ]
+
+    for config in rate_configs:
+        item = find_indicator(data, config["indicator_id"])
+
+        try:
+            result = fetch_rate_with_fallback(
+                config["label"],
+                config["fred_series"],
+                config["treasury_field"],
+            )
+
+            current_value = result["latest"]["value"]
+            previous_value = result["previous"]["value"]
+            change = round(current_value - previous_value, 4)
+            signal, score = rate_signal(current_value, change)
+
+            interpretation = f"{config['name']} 최신값은 {current_value}%입니다. 데이터 출처는 {result['provider']}입니다. 금리 변화는 이유를 함께 해석해야 합니다."
+            market_reaction = "금리 상승은 성장주와 고PER 종목의 멀티플에 부담입니다. 금리 하락은 인플레 안정에 의한 하락인지 경기 둔화 우려인지 구분해야 합니다."
+            action = "금리 축이 악화될 때는 성장주 추격 매수를 제한하고, 금리 안정 확인 후 분할 접근합니다."
+
+            info = update_indicator_success(
+                item,
+                result,
+                signal,
+                score,
+                interpretation,
+                market_reaction,
+                action,
+            )
+            updates.append({
+                "id": config["indicator_id"],
+                "signal": signal,
+                "score": score,
+                "value": info["currentValue"],
+                "change": info["change"],
+                "date": info["actualDate"],
+                "provider": info["provider"],
+            })
+            print(f"[update] {config['indicator_id']} auto-updated", flush=True)
+
+        except Exception as error:
+            error_message = str(error)
+            mark_source_error(item, today, error_message)
+            updates.append({
+                "id": config["indicator_id"],
+                "signal": "source-error",
+                "score": 0,
+                "value": "source-error",
+                "change": "source-error",
+                "date": today,
+                "provider": "source-error",
+            })
+            print(f"[update] {config['indicator_id']} source-error", flush=True)
+
+    update_rates_summary(data, updates)
+
+
+def update_rates_summary(data, updates):
+    score = sum(item["score"] for item in updates)
+    status = axis_status_from_score(score)
+
+    leading_statuses = [item["signal"] for item in updates if item["signal"] != "source-error"]
+
+    if any(item["signal"] == "source-error" for item in updates):
+        leading_status = "source-error" if not leading_statuses else status
+    else:
+        leading_status = status
+
+    details = []
+    for item in updates:
+        details.append(f"{item['id']}: {item['value']}")
+
+    summary_text = " / ".join(details)
+
+    data.setdefault("axisSummary", {})
+    if "rates" in data["axisSummary"]:
+        data["axisSummary"]["rates"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": leading_status,
+            "coincidentStatus": "warning",
+            "laggingStatus": "not-applicable",
+            "summary": f"2년물과 10년물 자동 업데이트 결과: {summary_text}",
+            "interpretation": "금리 축은 돈의 가격입니다. 방향보다 금리 변화의 이유를 우선 확인해야 합니다.",
+            "action": "금리 급등 구간에서는 성장주 추격 매수를 제한하고, 금리 안정 시 분할 접근합니다.",
+        })
+
+    data.setdefault("matrix", {})
+    if "rates" in data["matrix"]:
+        data["matrix"]["rates"].update({
+            "leading": leading_status,
+            "coincident": "warning",
+            "lagging": "not-applicable",
+        })
+
+    data.setdefault("marketSummary", {})
+    data["marketSummary"].update({
+        "marketCondition": "neutral",
+        "marketConditionLabel": "VIX + 금리 자동 업데이트 2단계",
+        "riskMode": "balanced",
+        "summary": "VIX와 2년물·10년물 금리 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
+        "conflictSummary": "현재는 변동성과 금리 축만 자동화된 상태이므로, 실적·자금흐름·고용·소비 축과의 연결 판단은 다음 단계에서 확장합니다.",
+        "watchAxes": ["rates", "flows", "volatility"],
+    })
+
+
 def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date, provider):
     score = 0
 
@@ -357,12 +643,7 @@ def update_volatility_summary(data, vix_status, change_status, vix_value, change
     elif change_status == "negative":
         score -= 1
 
-    if score > 0:
-        axis_status = "positive"
-    elif score < 0:
-        axis_status = "negative"
-    else:
-        axis_status = "neutral"
+    axis_status = axis_status_from_score(score)
 
     data.setdefault("axisSummary", {})
     if "volatility" in data["axisSummary"]:
@@ -398,16 +679,6 @@ def update_volatility_summary(data, vix_status, change_status, vix_value, change
             "summary": f"VIX 현재값은 {vix_value}입니다. 단기 공포 수준을 확인합니다.",
         })
 
-    data.setdefault("marketSummary", {})
-    data["marketSummary"].update({
-        "marketCondition": "neutral",
-        "marketConditionLabel": "VIX 자동 업데이트 1단계",
-        "riskMode": "balanced",
-        "summary": f"VIX 자동 업데이트가 완료되었습니다. 최신 기준일은 {actual_date}, 데이터 출처는 {provider}입니다.",
-        "conflictSummary": "현재는 VIX 축만 실제 자동화된 상태이므로 전체 8축 충돌 판단은 보류합니다.",
-        "watchAxes": ["rates", "flows", "volatility"],
-    })
-
 
 def update_volatility_source_error(data, error_message):
     data.setdefault("axisSummary", {})
@@ -431,16 +702,6 @@ def update_volatility_source_error(data, error_message):
             "lagging": "not-applicable",
         })
 
-    data.setdefault("marketSummary", {})
-    data["marketSummary"].update({
-        "marketCondition": "neutral",
-        "marketConditionLabel": "VIX 소스 오류",
-        "riskMode": "balanced",
-        "summary": "VIX 자동 업데이트가 실패했습니다. 사이트는 유지되지만 해당 지표는 source-error로 표시됩니다.",
-        "conflictSummary": "VIX 데이터 확인 전까지 변동성 축 판단은 보류합니다.",
-        "watchAxes": ["volatility"],
-    })
-
 
 def update_meta(data):
     now = datetime.now(KST)
@@ -451,13 +712,13 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-fallback-update-v1",
+        "automationStatus": "vix-rates-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트 1단계가 실행되었습니다.",
-            "1차 FRED VIXCLS, 2차 Yahoo Finance ^VIX, 3차 Stooq ^vix 순서로 시도합니다.",
-            "성공 시 VIX는 auto-updated로 표시됩니다.",
-            "모든 소스 실패 시 VIX는 source-error로 표시됩니다.",
+            "VIX fallback 자동 업데이트와 금리 2개 지표 자동 업데이트가 실행되었습니다.",
+            "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
+            "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
+            "성공 시 auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
     })
@@ -477,7 +738,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX fallback auto update", flush=True)
+    print("[start] VIX + rates safe auto update", flush=True)
 
     data = load_data()
 
@@ -486,13 +747,14 @@ def main():
     print(f"[check] indicator count = {len(data.get('indicators', []))}", flush=True)
 
     update_vix(data)
+    update_rates(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
 
-    print("[done] VIX fallback auto update completed", flush=True)
+    print("[done] VIX + rates safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
