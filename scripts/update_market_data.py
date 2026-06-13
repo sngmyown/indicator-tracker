@@ -17,6 +17,7 @@ FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
 YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=1mo&interval=1d"
 STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=%5Evix&i=d"
 TREASURY_YIELD_CURVE_BASE = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
+DOL_AR539_CSV_URL = "https://oui.doleta.gov/unemploy/csv/ar539.csv"
 
 
 def fred_url(series_id):
@@ -139,6 +140,32 @@ def fetch_fred_series(series_id):
         "url": fred_url(series_id),
         "latest": latest,
         "previous": previous,
+    }
+
+
+def fetch_fred_series_recent(series_id, years_back=2):
+    now = datetime.now(KST)
+    start_year = max(1900, now.year - years_back)
+    start_date = f"{start_year}-01-01"
+    url = f"{fred_url(series_id)}&cosd={start_date}"
+    text = fetch_text(url, retries=2, timeout=10)
+    reader = csv.DictReader(StringIO(text))
+
+    rows = []
+    for row in reader:
+        rows.append({
+            "date": row.get("observation_date"),
+            "value": row.get(series_id),
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "FRED",
+        "series": series_id,
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
     }
 
 
@@ -646,9 +673,87 @@ def update_rates_summary(data, updates):
     })
 
 
+def parse_number(value):
+    if value is None:
+        raise ValueError("값이 없습니다.")
+
+    text_value = str(value).strip().replace(",", "")
+    if text_value == "" or text_value == ".":
+        raise ValueError("비어 있는 숫자 값입니다.")
+
+    return float(text_value)
+
+
+def parse_dol_date(value):
+    raw = str(value).strip()
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+
+    return raw[:10]
+
+
+def fetch_dol_ar539_initial_claims_proxy():
+    """DOL ETA 539 raw CSV fallback.
+
+    This is not the same as FRED ICSA. FRED ICSA is seasonally adjusted.
+    The DOL AR539 file is used here only as a proxy fallback so the dashboard
+    can show a current directional number when FRED is unavailable.
+    """
+    text = fetch_text(DOL_AR539_CSV_URL, retries=2, timeout=12)
+    reader = csv.DictReader(StringIO(text))
+
+    weekly_totals = {}
+
+    for row in reader:
+        lower = {str(key).strip().lower(): value for key, value in row.items() if key is not None}
+
+        date_raw = lower.get("c2")
+        if not date_raw:
+            continue
+
+        try:
+            regular_initial = parse_number(lower.get("c3", 0))
+        except Exception:
+            regular_initial = 0
+
+        try:
+            federal_initial = parse_number(lower.get("c4", 0))
+        except Exception:
+            federal_initial = 0
+
+        total = regular_initial + federal_initial
+        if total <= 0:
+            continue
+
+        date = parse_dol_date(date_raw)
+        weekly_totals[date] = weekly_totals.get(date, 0) + total
+
+    rows = [
+        {"date": date, "value": value}
+        for date, value in weekly_totals.items()
+    ]
+
+    latest, previous = latest_two_from_rows(rows)
+    latest["value"] = round(latest["value"])
+    previous["value"] = round(previous["value"])
+
+    return {
+        "provider": "DOL ETA 539 Raw CSV",
+        "series": "AR539-C3+C4-proxy",
+        "url": DOL_AR539_CSV_URL,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": True,
+    }
+
+
 def fetch_initial_claims_with_fallback():
     providers = [
-        ("FRED", lambda: fetch_fred_series("ICSA")),
+        ("FRED recent ICSA", lambda: fetch_fred_series_recent("ICSA", years_back=2)),
+        ("DOL ETA 539 Raw CSV proxy", fetch_dol_ar539_initial_claims_proxy),
     ]
 
     return fetch_with_fallback("initial_claims", providers)
@@ -666,11 +771,20 @@ def update_employment(data):
         current_value = result["latest"]["value"]
         previous_value = result["previous"]["value"]
         change = round(current_value - previous_value, 4)
-        signal, score = initial_claims_signal(current_value, change)
 
-        interpretation = f"신규 실업수당 청구건수 최신값은 {current_value:,.0f}건입니다. 데이터 출처는 {result['provider']}입니다. 절대 수준과 전주 대비 증가 속도를 함께 봅니다."
-        market_reaction = "청구건수가 빠르게 늘면 고용 냉각과 경기 둔화 가능성이 커집니다. 낮고 안정적인 청구건수는 소비와 기업 매출 체력에는 우호적입니다."
-        action = "청구건수가 악화되면 경기민감주와 고레버리지 성장주의 비중 확대를 늦추고, 실업률·NFP·임금 상승률과 함께 확인합니다."
+        is_proxy = bool(result.get("isProxy"))
+        if is_proxy:
+            signal, score = "neutral", 0
+            status_note = "proxy-auto-updated"
+            interpretation = f"신규 실업수당 청구건수는 {current_value:,.0f}건입니다. 데이터 출처는 {result['provider']}입니다. 이 값은 FRED ICSA가 실패했을 때 쓰는 DOL 원자료 기반 프록시이므로, 계절조정 ICSA와 완전히 동일하지 않습니다."
+            market_reaction = "프록시 값은 고용 냉각 여부를 임시로 확인하기 위한 참고값입니다. 시장 판단에서는 다음 실행에서 FRED ICSA가 복구되는지 함께 확인해야 합니다."
+            action = "프록시 값만으로 포지션을 크게 바꾸지 말고, 실업률·NFP·임금 상승률과 함께 확인합니다."
+        else:
+            signal, score = initial_claims_signal(current_value, change)
+            status_note = "auto-updated"
+            interpretation = f"신규 실업수당 청구건수 최신값은 {current_value:,.0f}건입니다. 데이터 출처는 {result['provider']}입니다. 절대 수준과 전주 대비 증가 속도를 함께 봅니다."
+            market_reaction = "청구건수가 빠르게 늘면 고용 냉각과 경기 둔화 가능성이 커집니다. 낮고 안정적인 청구건수는 소비와 기업 매출 체력에는 우호적입니다."
+            action = "청구건수가 악화되면 경기민감주와 고레버리지 성장주의 비중 확대를 늦추고, 실업률·NFP·임금 상승률과 함께 확인합니다."
 
         info = update_indicator_success(
             item,
@@ -680,6 +794,7 @@ def update_employment(data):
             interpretation,
             market_reaction,
             action,
+            status_note=status_note,
         )
 
         update_employment_summary(data, {
@@ -847,14 +962,14 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-update-v1",
+        "automationStatus": "vix-rates-employment-fallback-update-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
-            "신규 실업수당 청구건수는 FRED ICSA를 사용합니다.",
-            "성공 시 auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
+            "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
+            "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
     })
