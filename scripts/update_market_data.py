@@ -22,6 +22,9 @@ BLS_PUBLIC_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BLS_UNRATE_SERIES_ID = "LNS14000000"
 STOOQ_WTI_URL = "https://stooq.com/q/d/l/?s=cl.f&i=d"
 STOOQ_DOLLAR_INDEX_URL = "https://stooq.com/q/d/l/?s=dx.f&i=d"
+YAHOO_DOLLAR_INDEX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?range=1mo&interval=1d"
+YAHOO_DOLLAR_INDEX_ALT_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EDXY?range=1mo&interval=1d"
+YAHOO_WTI_URL = "https://query1.finance.yahoo.com/v8/finance/chart/CL%3DF?range=1mo&interval=1d"
 
 
 def fred_url(series_id):
@@ -209,6 +212,53 @@ def fetch_yahoo_vix():
         "latest": latest,
         "previous": previous,
     }
+
+
+def fetch_yahoo_chart_close(url, series_name, label):
+    text = fetch_text(url, retries=1, timeout=8)
+    payload = json.loads(text)
+
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        error = payload.get("chart", {}).get("error")
+        raise ValueError(f"Yahoo Finance 응답에 chart.result가 없습니다. error={error}")
+
+    result0 = result[0]
+    timestamps = result0.get("timestamp") or []
+    quote = result0.get("indicators", {}).get("quote", [{}])[0]
+    closes = quote.get("close") or []
+
+    rows = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        date = datetime.fromtimestamp(ts, KST).date().isoformat()
+        rows.append({
+            "date": date,
+            "value": close,
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": label,
+        "series": series_name,
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": True,
+    }
+
+
+def fetch_yahoo_dollar_index():
+    return fetch_yahoo_chart_close(YAHOO_DOLLAR_INDEX_URL, "DX-Y.NYB", "Yahoo Finance Dollar Index")
+
+
+def fetch_yahoo_dollar_index_alt():
+    return fetch_yahoo_chart_close(YAHOO_DOLLAR_INDEX_ALT_URL, "^DXY", "Yahoo Finance Dollar Index Alt")
+
+
+def fetch_yahoo_wti_oil():
+    return fetch_yahoo_chart_close(YAHOO_WTI_URL, "CL=F", "Yahoo Finance WTI Futures")
 
 
 def fetch_stooq_vix():
@@ -468,7 +518,32 @@ def axis_status_from_score(score):
     return "neutral"
 
 
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def mark_source_error(item, today, error_message):
+    """Mark source failure without deleting a previously valid value.
+
+    자동 업데이트 대시보드에서 가장 위험한 동작은 일시적 네트워크 실패 때문에
+    직전 정상 숫자를 source-error 문자열로 덮어쓰는 것입니다.
+    이미 숫자가 있으면 숫자는 보존하고, statusNote만 source-error로 바꿉니다.
+    숫자가 없을 때만 currentValue를 source-error로 표시합니다.
+    """
+    previous_current = item.get("currentValue")
+    previous_date = item.get("actualDate")
+
+    if is_number(previous_current):
+        item.update({
+            "sourceErrorAt": today,
+            "sourceErrorMessage": str(error_message)[:500],
+            "interpretation": f"최신 데이터 호출에 실패했습니다. 직전 정상값 {previous_current}을 유지합니다. 직전 기준일: {previous_date or '확인 필요'}. 오류: {error_message}",
+            "marketReaction": "일시적 데이터 소스 오류일 수 있으므로, 숫자는 참고하되 최신성은 낮게 봅니다.",
+            "action": "다음 자동 업데이트에서 복구되는지 확인하고, 필요한 경우 원천 데이터를 직접 확인합니다.",
+            "statusNote": "source-error",
+        })
+        return
+
     item.update({
         "currentValue": "source-error",
         "previousValue": "source-error",
@@ -880,10 +955,54 @@ def fetch_bls_unemployment_rate():
     }
 
 
+def fetch_bls_unemployment_rate_get():
+    now = datetime.now(KST)
+    start_year = now.year - 3
+    end_year = now.year
+    url = f"{BLS_PUBLIC_API_URL}{BLS_UNRATE_SERIES_ID}?startyear={start_year}&endyear={end_year}"
+    text = fetch_text(url, retries=1, timeout=10)
+    payload_json = json.loads(text)
+
+    status = payload_json.get("status")
+    if status not in ("REQUEST_SUCCEEDED", "REQUEST_SUCCEEDED_WITH_ERRORS"):
+        raise ValueError(f"BLS GET API status가 정상 범위가 아닙니다: {status}")
+
+    series_list = payload_json.get("Results", {}).get("series", [])
+    if not series_list:
+        raise ValueError("BLS GET API 응답에 Results.series가 없습니다.")
+
+    rows = []
+    for point in series_list[0].get("data", []):
+        year = point.get("year")
+        period = point.get("period")
+        value = point.get("value")
+
+        if not year or not period or not period.startswith("M") or period == "M13":
+            continue
+
+        month = int(period[1:])
+        date = f"{int(year):04d}-{month:02d}-01"
+        rows.append({
+            "date": date,
+            "value": value,
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "BLS Public Data API GET",
+        "series": BLS_UNRATE_SERIES_ID,
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
 def fetch_unemployment_rate_with_fallback():
     providers = [
         ("FRED recent UNRATE", lambda: fetch_fred_series_recent("UNRATE", years_back=5)),
-        ("BLS Public Data API LNS14000000", fetch_bls_unemployment_rate),
+        ("BLS Public Data API POST LNS14000000", fetch_bls_unemployment_rate),
+        ("BLS Public Data API GET LNS14000000", fetch_bls_unemployment_rate_get),
     ]
 
     return fetch_with_fallback("unemployment_rate", providers)
@@ -915,6 +1034,8 @@ def fetch_stooq_daily_close(url, series_name, label):
 def fetch_dollar_index_with_fallback():
     providers = [
         ("FRED recent DTWEXBGS", lambda: fetch_fred_series_recent("DTWEXBGS", years_back=2)),
+        ("Yahoo Finance Dollar Index DX-Y.NYB proxy", fetch_yahoo_dollar_index),
+        ("Yahoo Finance Dollar Index ^DXY proxy", fetch_yahoo_dollar_index_alt),
         ("Stooq Dollar Index Futures proxy", lambda: fetch_stooq_daily_close(
             STOOQ_DOLLAR_INDEX_URL,
             "dx.f-proxy",
@@ -928,6 +1049,7 @@ def fetch_dollar_index_with_fallback():
 def fetch_wti_oil_with_fallback():
     providers = [
         ("FRED recent DCOILWTICO", lambda: fetch_fred_series_recent("DCOILWTICO", years_back=2)),
+        ("Yahoo Finance WTI CL=F proxy", fetch_yahoo_wti_oil),
         ("Stooq WTI Futures proxy", lambda: fetch_stooq_daily_close(
             STOOQ_WTI_URL,
             "cl.f-proxy",
@@ -1443,7 +1565,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-stable-update-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI 자동 업데이트가 실행되었습니다.",
@@ -1453,7 +1575,7 @@ def update_meta(data):
             "실업률은 FRED UNRATE를 먼저 시도하고, 실패 시 BLS Public Data API LNS14000000을 사용합니다.",
             "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
             "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Stooq WTI Futures 프록시를 사용합니다.",
-            "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
+            "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
     })
