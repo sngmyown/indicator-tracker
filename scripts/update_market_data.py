@@ -450,7 +450,7 @@ def update_all_indicators(data):
 
     # 5축. 소비 / 수요
     # Retail Sales는 CPI와 비교해서 실질 소비 프록시로 해석한다.
-    retail_item = find_indicator(data, "retail_sales")
+    retail_item = find_indicator(data, "retail_sales_yoy")
     try:
         retail_values = fetch_fred("RSXFS", min_count=14)
         cpi_values = fetch_fred("CPIAUCSL", min_count=14)
