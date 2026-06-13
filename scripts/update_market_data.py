@@ -2,6 +2,7 @@ import csv
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from io import StringIO
@@ -10,7 +11,10 @@ from zoneinfo import ZoneInfo
 
 DATA_PATH = Path("data/latest.json")
 KST = ZoneInfo("Asia/Seoul")
+
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=1mo&interval=1d"
+STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=%5Evix&i=d"
 
 
 def fred_url(series_id):
@@ -48,7 +52,7 @@ def find_indicator(data, indicator_id):
     raise KeyError(f"indicator id를 찾을 수 없습니다: {indicator_id}")
 
 
-def fetch_text(url, retries=2, timeout=8):
+def fetch_text(url, retries=1, timeout=8):
     last_error = None
 
     for attempt in range(1, retries + 1):
@@ -59,7 +63,7 @@ def fetch_text(url, retries=2, timeout=8):
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0",
-                    "Accept": "text/csv,text/plain,*/*",
+                    "Accept": "text/csv,text/plain,application/json,*/*",
                     "Cache-Control": "no-cache",
                 },
             )
@@ -80,32 +84,129 @@ def fetch_text(url, retries=2, timeout=8):
     raise RuntimeError(f"데이터 호출 실패: {url}. 마지막 오류: {last_error}")
 
 
-def fetch_fred_latest(series_id):
-    text = fetch_text(fred_url(series_id))
-    reader = csv.DictReader(StringIO(text))
-    values = []
+def latest_two_from_rows(rows, value_key="value"):
+    valid_rows = []
 
-    for row in reader:
-        date = row.get("observation_date")
-        raw = row.get(series_id)
+    for row in rows:
+        value = row.get(value_key)
+        date = row.get("date")
 
-        if not date or raw is None:
+        if date is None or value is None:
             continue
 
-        raw = str(raw).strip()
-
-        if raw == "" or raw == ".":
+        try:
+            numeric = round(float(value), 4)
+        except (TypeError, ValueError):
             continue
 
-        values.append({
-            "date": date,
-            "value": round(float(raw), 4),
+        valid_rows.append({
+            "date": str(date),
+            "value": numeric,
         })
 
-    if len(values) < 2:
-        raise ValueError(f"{series_id} 유효 데이터가 2개 미만입니다.")
+    if len(valid_rows) < 2:
+        raise ValueError("유효 데이터가 2개 미만입니다.")
 
-    return values[-1], values[-2]
+    return valid_rows[-1], valid_rows[-2]
+
+
+def fetch_fred_vix():
+    text = fetch_text(fred_url("VIXCLS"), retries=1, timeout=8)
+    reader = csv.DictReader(StringIO(text))
+
+    rows = []
+    for row in reader:
+        rows.append({
+            "date": row.get("observation_date"),
+            "value": row.get("VIXCLS"),
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "FRED",
+        "series": "VIXCLS",
+        "url": fred_url("VIXCLS"),
+        "latest": latest,
+        "previous": previous,
+    }
+
+
+def fetch_yahoo_vix():
+    text = fetch_text(YAHOO_VIX_URL, retries=1, timeout=8)
+    payload = json.loads(text)
+
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        raise ValueError("Yahoo Finance 응답에 chart.result가 없습니다.")
+
+    result0 = result[0]
+    timestamps = result0.get("timestamp") or []
+    quote = result0.get("indicators", {}).get("quote", [{}])[0]
+    closes = quote.get("close") or []
+
+    rows = []
+    for ts, close in zip(timestamps, closes):
+        if close is None:
+            continue
+
+        date = datetime.fromtimestamp(ts, KST).date().isoformat()
+        rows.append({
+            "date": date,
+            "value": close,
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "Yahoo Finance",
+        "series": "^VIX",
+        "url": YAHOO_VIX_URL,
+        "latest": latest,
+        "previous": previous,
+    }
+
+
+def fetch_stooq_vix():
+    text = fetch_text(STOOQ_VIX_URL, retries=1, timeout=8)
+    reader = csv.DictReader(StringIO(text))
+
+    rows = []
+    for row in reader:
+        rows.append({
+            "date": row.get("Date"),
+            "value": row.get("Close"),
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "Stooq",
+        "series": "^vix",
+        "url": STOOQ_VIX_URL,
+        "latest": latest,
+        "previous": previous,
+    }
+
+
+def fetch_vix_with_fallback():
+    providers = [
+        ("FRED", fetch_fred_vix),
+        ("Yahoo Finance", fetch_yahoo_vix),
+        ("Stooq", fetch_stooq_vix),
+    ]
+
+    errors = []
+
+    for provider_name, fetcher in providers:
+        try:
+            print(f"[vix] trying provider: {provider_name}", flush=True)
+            result = fetcher()
+            print(f"[vix] provider succeeded: {provider_name}", flush=True)
+            return result
+        except Exception as error:
+            message = f"{provider_name}: {error}"
+            errors.append(message)
+            print(f"[vix] provider failed: {message}", flush=True)
+
+    raise RuntimeError(" | ".join(errors))
 
 
 def percent_change(current, previous):
@@ -126,20 +227,26 @@ def direction_from_change(change):
 def vix_signal(value):
     if value >= 30:
         return "negative", -1
+
     if value >= 20:
         return "warning", 0
+
     if 10 < value < 20:
         return "positive", 1
+
     return "warning", 0
 
 
 def vix_change_signal(change_percent):
     if change_percent >= 20:
         return "negative", -1
+
     if change_percent >= 8:
         return "warning", 0
+
     if change_percent <= -8:
         return "positive", 1
+
     return "neutral", 0
 
 
@@ -168,7 +275,10 @@ def update_vix(data):
     vix_change = find_indicator(data, "vix_change_rate")
 
     try:
-        latest, previous = fetch_fred_latest("VIXCLS")
+        result = fetch_vix_with_fallback()
+
+        latest = result["latest"]
+        previous = result["previous"]
 
         current_value = latest["value"]
         previous_value = previous["value"]
@@ -179,10 +289,14 @@ def update_vix(data):
         signal, score = vix_signal(current_value)
         change_signal, change_score = vix_change_signal(change_percent)
 
+        provider = result["provider"]
+        source_series = result["series"]
+        source_url = result["url"]
+
         vix.update({
-            "source": "FRED",
-            "sourceSeries": "VIXCLS",
-            "sourceUrl": fred_url("VIXCLS"),
+            "source": provider,
+            "sourceSeries": source_series,
+            "sourceUrl": source_url,
             "currentValue": current_value,
             "previousValue": previous_value,
             "unit": "index",
@@ -192,16 +306,16 @@ def update_vix(data):
             "changePercent": change_percent,
             "signal": signal,
             "score": score,
-            "interpretation": f"VIX 최신값은 {current_value}입니다. 10~20은 정상 위험선호, 20 이상은 긴장 상승, 30 이상은 공포 구간으로 봅니다.",
+            "interpretation": f"VIX 최신값은 {current_value}입니다. 데이터 출처는 {provider}입니다. 10~20은 정상 위험선호, 20 이상은 긴장 상승, 30 이상은 공포 구간으로 봅니다.",
             "marketReaction": "VIX가 낮고 안정적이면 위험자산에는 우호적입니다. VIX가 빠르게 상승하면 단기 조정 또는 공포 확산을 경계해야 합니다.",
             "action": "VIX만으로 매수·매도하지 말고 금리, 자금 흐름, 실적 축과 함께 확인합니다.",
             "statusNote": "auto-updated",
         })
 
         vix_change.update({
-            "source": "Derived",
-            "sourceSeries": "VIXCLS-change",
-            "sourceUrl": fred_url("VIXCLS"),
+            "source": f"Derived from {provider}",
+            "sourceSeries": f"{source_series}-change",
+            "sourceUrl": source_url,
             "currentValue": change_percent,
             "previousValue": 0,
             "unit": "%",
@@ -217,18 +331,20 @@ def update_vix(data):
             "statusNote": "auto-updated",
         })
 
-        update_volatility_summary(data, signal, change_signal, current_value, change_percent, latest["date"])
-        print("[update] VIX auto-updated", flush=True)
+        update_volatility_summary(data, signal, change_signal, current_value, change_percent, latest["date"], provider)
+        print(f"[update] VIX auto-updated from {provider}", flush=True)
 
     except Exception as error:
         error_message = str(error)
+
         mark_source_error(vix, today, error_message)
         mark_source_error(vix_change, today, error_message)
+
         update_volatility_source_error(data, error_message)
         print("[update] VIX source-error", flush=True)
 
 
-def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date):
+def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date, provider):
     score = 0
 
     if vix_status == "positive":
@@ -256,7 +372,7 @@ def update_volatility_summary(data, vix_status, change_status, vix_value, change
             "leadingStatus": change_status,
             "coincidentStatus": vix_status,
             "laggingStatus": "not-applicable",
-            "summary": f"VIX {vix_value}, 변화율 {change_percent}%입니다.",
+            "summary": f"VIX {vix_value}, 변화율 {change_percent}%입니다. 데이터 출처는 {provider}입니다.",
             "interpretation": "VIX 현재값과 변화율을 함께 보면 단기 공포의 수준과 확산 속도를 구분할 수 있습니다.",
             "action": "변동성 축은 단독 판단보다 금리, 자금 흐름, 실적 축과 연결해 해석합니다.",
         })
@@ -287,7 +403,7 @@ def update_volatility_summary(data, vix_status, change_status, vix_value, change
         "marketCondition": "neutral",
         "marketConditionLabel": "VIX 자동 업데이트 1단계",
         "riskMode": "balanced",
-        "summary": f"VIX 자동 업데이트가 완료되었습니다. 최신 기준일은 {actual_date}입니다.",
+        "summary": f"VIX 자동 업데이트가 완료되었습니다. 최신 기준일은 {actual_date}, 데이터 출처는 {provider}입니다.",
         "conflictSummary": "현재는 VIX 축만 실제 자동화된 상태이므로 전체 8축 충돌 판단은 보류합니다.",
         "watchAxes": ["rates", "flows", "volatility"],
     })
@@ -303,7 +419,7 @@ def update_volatility_source_error(data, error_message):
             "coincidentStatus": "source-error",
             "laggingStatus": "not-applicable",
             "summary": "VIX 데이터 소스 호출에 실패했습니다.",
-            "interpretation": f"FRED VIXCLS 호출 오류: {error_message}",
+            "interpretation": f"FRED/Yahoo/Stooq VIX 호출 오류: {error_message}",
             "action": "GitHub Actions 로그를 확인하고, 다음 실행에서 재시도합니다.",
         })
 
@@ -335,12 +451,13 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-auto-update-v1",
+        "automationStatus": "vix-fallback-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX 자동 업데이트 1단계가 실행되었습니다.",
-            "FRED 호출 성공 시 VIX는 auto-updated로 표시됩니다.",
-            "FRED 호출 실패 시 VIX는 source-error로 표시됩니다.",
+            "VIX fallback 자동 업데이트 1단계가 실행되었습니다.",
+            "1차 FRED VIXCLS, 2차 Yahoo Finance ^VIX, 3차 Stooq ^vix 순서로 시도합니다.",
+            "성공 시 VIX는 auto-updated로 표시됩니다.",
+            "모든 소스 실패 시 VIX는 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
     })
@@ -360,7 +477,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX safe auto update", flush=True)
+    print("[start] VIX fallback auto update", flush=True)
 
     data = load_data()
 
@@ -370,10 +487,12 @@ def main():
 
     update_vix(data)
     update_meta(data)
+
     assert_no_null(data)
+
     save_data(data)
 
-    print("[done] VIX safe auto update completed", flush=True)
+    print("[done] VIX fallback auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
