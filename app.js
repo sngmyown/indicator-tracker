@@ -56,6 +56,105 @@ function formatValue(value, unit = "") {
   return `${escapeHtml(value)}${suffix}`;
 }
 
+function currentValueStatusClass(item) {
+  const status = item?.statusNote || "";
+
+  if (status === "auto-updated") return "value-live";
+  if (status === "proxy-auto-updated") return "value-live";
+  if (status === "source-error") return "value-error";
+  if (status === "auto-pending") return "value-pending";
+  if (status === "manual-required") return "value-manual";
+
+  return "value-default";
+}
+
+function renderCurrentValue(item, extraClass = "") {
+  return `<strong class="current-value-strong ${currentValueStatusClass(item)} ${extraClass}">${formatValue(item.currentValue, item.unit)}</strong>`;
+}
+
+function injectCurrentValueStyles() {
+  if (document.getElementById("current-value-highlight-style")) return;
+
+  const style = document.createElement("style");
+  style.id = "current-value-highlight-style";
+  style.textContent = `
+    .field-current-value {
+      border-color: rgba(255, 255, 255, 0.24) !important;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04)) !important;
+    }
+
+    .current-value-strong {
+      display: inline-block;
+      min-width: 104px;
+      text-align: right;
+      color: #ffffff;
+      font-size: 1.55rem;
+      font-weight: 900;
+      line-height: 1.15;
+      letter-spacing: 0.01em;
+      padding: 7px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+        0 10px 26px rgba(0, 0, 0, 0.18);
+      text-shadow: 0 1px 14px rgba(255, 255, 255, 0.18);
+    }
+
+    .current-value-strong.value-live {
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.16);
+      border-color: rgba(255, 255, 255, 0.28);
+    }
+
+    .current-value-strong.value-pending {
+      color: rgba(255, 255, 255, 0.68);
+      background: rgba(255, 255, 255, 0.055);
+      border-color: rgba(255, 255, 255, 0.11);
+      box-shadow: none;
+    }
+
+    .current-value-strong.value-manual {
+      color: #ffe9a8;
+      background: rgba(255, 208, 0, 0.09);
+      border-color: rgba(255, 208, 0, 0.22);
+    }
+
+    .current-value-strong.value-error {
+      color: #ffb3b3;
+      background: rgba(255, 80, 80, 0.11);
+      border-color: rgba(255, 80, 80, 0.25);
+    }
+
+    .current-value-inline {
+      min-width: auto;
+      margin-left: 4px;
+      margin-right: 4px;
+      padding: 2px 7px;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 850;
+      vertical-align: baseline;
+      box-shadow: none;
+    }
+
+    @media (max-width: 640px) {
+      .current-value-strong {
+        min-width: 88px;
+        font-size: 1.35rem;
+        padding: 6px 10px;
+      }
+
+      .current-value-inline {
+        font-size: 0.95rem;
+        padding: 2px 6px;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function isStale(updatedAt) {
   const parsed = Date.parse(updatedAt);
   if (Number.isNaN(parsed)) return true;
@@ -155,7 +254,7 @@ function renderAxes(data) {
           ${items.map(item => `
             <div class="key-item">
               <strong>${escapeHtml(item.name)} ${badge(item.signal, labelStatus(item.signal))}</strong>
-              <span>${escapeHtml(item.timingLabel)} · 현재값 ${formatValue(item.currentValue, item.unit)} · ${escapeHtml(item.statusNote)}</span>
+              <span>${escapeHtml(item.timingLabel)} · 현재값 ${renderCurrentValue(item, "current-value-inline")} · ${escapeHtml(item.statusNote)}</span>
             </div>
           `).join("")}
         </div>
@@ -227,7 +326,7 @@ function indicatorCard(item) {
         ${badge(item.signal, labelStatus(item.signal))}
       </header>
       <div class="indicator-grid">
-        <div class="field"><small>현재값</small><strong>${formatValue(item.currentValue, item.unit)}</strong></div>
+        <div class="field field-current-value"><small>현재값</small>${renderCurrentValue(item)}</div>
         <div class="field"><small>이전값</small><strong>${formatValue(item.previousValue, item.unit)}</strong></div>
         <div class="field"><small>변화</small><strong>${formatValue(item.change, item.unit)} / ${formatValue(item.changePercent, "%")}</strong></div>
         <div class="field"><small>출처</small><strong>${escapeHtml(item.source)} · ${escapeHtml(item.sourceSeries)}</strong></div>
@@ -294,6 +393,7 @@ function setupTabs() {
 
 async function init() {
   setupTabs();
+  injectCurrentValueStyles();
 
   try {
     const response = await fetch(DATA_URL);
