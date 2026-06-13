@@ -1,98 +1,121 @@
 name: Update market dashboard data
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 22 * * 0-5"
+workflow_dispatch:
+schedule:
+- cron: "17 22 * * 0-5"
 
 permissions:
-  contents: write
+contents: write
 
 jobs:
-  update-market-data:
-    runs-on: ubuntu-latest
+update-market-data:
+runs-on: ubuntu-latest
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+```
+steps:
+  - name: Check out repository
+    uses: actions/checkout@v4
+    with:
+      fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.11"
 
-      - name: Show files before update
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Root files:"
-          ls -la
-          echo "Data folder:"
-          ls -la data || true
-          echo "Scripts folder:"
-          ls -la scripts || true
-          echo "Current schema before update:"
-          grep -n '"schemaVersion"' data/latest.json || true
-          echo "Current currentValue fields before update:"
-          grep -n '"currentValue"' data/latest.json | head -20 || true
-          echo "Current statusNote fields before update:"
-          grep -n '"statusNote"' data/latest.json | head -20 || true
+  - name: Show files before update
+    run: |
+      echo "Current directory:"
+      pwd
 
-      - name: Update latest market data
-        run: python scripts/update_market_data.py
+      echo "Root files:"
+      ls -la
 
-      - name: Verify updated latest.json
-        run: |
-          echo "Check v1 schema:"
-          grep -n '"schemaVersion"' data/latest.json
-          grep -n '"meta"' data/latest.json
-          grep -n '"indicators"' data/latest.json
-          grep -n '"currentValue"' data/latest.json | head -20
+      echo "Data folder:"
+      ls -la data || true
 
-          echo "Check automation results:"
-          grep -n 'auto-updated' data/latest.json || true
-          grep -n 'proxy-auto-updated' data/latest.json || true
-          grep -n 'source-error' data/latest.json || true
+      echo "Scripts folder:"
+      ls -la scripts || true
 
-          echo "Check important source series:"
-          grep -n 'VIXCLS' data/latest.json
-          grep -n 'DGS10' data/latest.json
-          grep -n 'DGS2' data/latest.json
-          grep -n 'ICSA' data/latest.json
+      echo "Check v1 schema before update:"
+      grep -n '"schemaVersion"' data/latest.json || true
+      grep -n '"meta"' data/latest.json || true
+      grep -n '"indicators"' data/latest.json || true
 
-          echo "Reject old v0 fields if they remain:"
-          if grep -n '"freshnessStatus"' data/latest.json; then
-            echo "ERROR: old v0 field freshnessStatus remains."
-            exit 1
-          fi
+      echo "Check currentValue fields before update:"
+      grep -n '"currentValue"' data/latest.json | head -20 || true
 
-          if grep -n '"actual"' data/latest.json; then
-            echo "ERROR: old v0 field actual remains."
-            exit 1
-          fi
+      echo "Check statusNote fields before update:"
+      grep -n '"statusNote"' data/latest.json | head -20 || true
 
-      - name: Commit and push updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+  - name: Update latest market data
+    run: python scripts/update_market_data.py
 
-          echo "Git status before add:"
-          git status --short
+  - name: Verify updated latest.json
+    run: |
+      echo "Check v1 schema:"
+      grep -n '"schemaVersion"' data/latest.json
+      grep -n '"meta"' data/latest.json
+      grep -n '"marketSummary"' data/latest.json
+      grep -n '"timingSummary"' data/latest.json
+      grep -n '"axisSummary"' data/latest.json
+      grep -n '"matrix"' data/latest.json
+      grep -n '"indicators"' data/latest.json
+      grep -n '"currentValue"' data/latest.json | head -20
+      grep -n '"statusNote"' data/latest.json | head -20
 
-          git add data/latest.json
+      echo "Check important source series:"
+      grep -n 'VIXCLS' data/latest.json
+      grep -n 'DGS10' data/latest.json
+      grep -n 'DGS2' data/latest.json
+      grep -n 'ICSA' data/latest.json
 
-          echo "Git status after add:"
-          git status --short
+      echo "Check automation result markers:"
+      grep -n 'auto-updated' data/latest.json || true
+      grep -n 'proxy-auto-updated' data/latest.json || true
+      grep -n 'source-error' data/latest.json || true
 
-          if git diff --cached --quiet; then
-            echo "No staged changes to commit."
-          else
-            git commit -m "Update v1 market dashboard data"
-            git pull --rebase
-            git push
-          fi
+      echo "Require at least one v1 update result:"
+      if grep -E '"statusNote": "(auto-updated|proxy-auto-updated|source-error)"' data/latest.json; then
+        echo "v1 update result marker found."
+      else
+        echo "ERROR: No v1 update result marker found. update_market_data.py did not update indicator values."
+        exit 1
+      fi
 
-          echo "Git status after push:"
-          git status --short
+      echo "Reject old v0 fields:"
+      if grep -n '"freshnessStatus"' data/latest.json; then
+        echo "ERROR: old v0 field freshnessStatus remains."
+        exit 1
+      fi
+
+      if grep -n '"actual":' data/latest.json; then
+        echo "ERROR: old v0 field actual remains."
+        exit 1
+      fi
+
+  - name: Commit and push updated data
+    run: |
+      git config user.name "github-actions[bot]"
+      git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      echo "Git status before add:"
+      git status --short
+
+      git add data/latest.json
+
+      echo "Git status after add:"
+      git status --short
+
+      if git diff --cached --quiet; then
+        echo "No staged changes to commit."
+      else
+        git commit -m "Update v1 market dashboard data"
+        git pull --rebase
+        git push
+      fi
+
+      echo "Git status after push:"
+      git status --short
+```
