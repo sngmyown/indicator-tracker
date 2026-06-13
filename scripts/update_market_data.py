@@ -18,6 +18,8 @@ YAHOO_VIX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?range=
 STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=%5Evix&i=d"
 TREASURY_YIELD_CURVE_BASE = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 DOL_AR539_CSV_URL = "https://oui.doleta.gov/unemploy/csv/ar539.csv"
+BLS_PUBLIC_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+BLS_UNRATE_SERIES_ID = "LNS14000000"
 
 
 def fred_url(series_id):
@@ -404,6 +406,23 @@ def initial_claims_signal(value, change):
 
     return "neutral", 0
 
+def unemployment_rate_signal(value, change):
+    """실업률 해석 기준.
+
+    실업률은 후행지표이므로 단일 수치보다 상승 속도를 더 경계합니다.
+    value는 실업률 %, change는 전월 대비 %p 변화입니다.
+    """
+    if value >= 4.8 or change >= 0.3:
+        return "negative", -1
+
+    if value >= 4.4 or change >= 0.15:
+        return "warning", 0
+
+    if value <= 4.0 and change <= 0:
+        return "positive", 1
+
+    return "neutral", 0
+
 
 def axis_status_from_score(score):
     if score > 0:
@@ -759,7 +778,82 @@ def fetch_initial_claims_with_fallback():
     return fetch_with_fallback("initial_claims", providers)
 
 
-def update_employment(data):
+def fetch_bls_unemployment_rate():
+    """BLS public API fallback for the unemployment rate.
+
+    FRED UNRATE is also sourced from BLS. This direct BLS fallback uses
+    LNS14000000, the seasonally adjusted civilian unemployment rate.
+    """
+    now = datetime.now(KST)
+    payload = json.dumps({
+        "seriesid": [BLS_UNRATE_SERIES_ID],
+        "startyear": str(now.year - 3),
+        "endyear": str(now.year),
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        BLS_PUBLIC_API_URL,
+        data=payload,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/json",
+            "Accept": "application/json,*/*",
+        },
+        method="POST",
+    )
+
+    print(f"[fetch] BLS unemployment API: {BLS_PUBLIC_API_URL}", flush=True)
+    with urllib.request.urlopen(request, timeout=12) as response:
+        payload_text = response.read().decode("utf-8")
+
+    payload_json = json.loads(payload_text)
+    status = payload_json.get("status")
+    if status not in ("REQUEST_SUCCEEDED", "REQUEST_SUCCEEDED_WITH_ERRORS"):
+        raise ValueError(f"BLS API status가 정상 범위가 아닙니다: {status}")
+
+    series_list = payload_json.get("Results", {}).get("series", [])
+    if not series_list:
+        raise ValueError("BLS API 응답에 Results.series가 없습니다.")
+
+    data_points = series_list[0].get("data", [])
+    rows = []
+
+    for point in data_points:
+        year = point.get("year")
+        period = point.get("period")
+        value = point.get("value")
+
+        if not year or not period or not period.startswith("M") or period == "M13":
+            continue
+
+        month = int(period[1:])
+        date = f"{int(year):04d}-{month:02d}-01"
+        rows.append({
+            "date": date,
+            "value": value,
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "BLS Public Data API",
+        "series": BLS_UNRATE_SERIES_ID,
+        "url": BLS_PUBLIC_API_URL,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
+def fetch_unemployment_rate_with_fallback():
+    providers = [
+        ("FRED recent UNRATE", lambda: fetch_fred_series_recent("UNRATE", years_back=5)),
+        ("BLS Public Data API LNS14000000", fetch_bls_unemployment_rate),
+    ]
+
+    return fetch_with_fallback("unemployment_rate", providers)
+
+
+def update_initial_claims(data):
     now = datetime.now(KST)
     today = now.date().isoformat()
 
@@ -797,7 +891,8 @@ def update_employment(data):
             status_note=status_note,
         )
 
-        update_employment_summary(data, {
+        print("[update] initial_claims auto-updated", flush=True)
+        return {
             "id": "initial_claims",
             "signal": signal,
             "score": score,
@@ -805,13 +900,14 @@ def update_employment(data):
             "change": info["change"],
             "date": info["actualDate"],
             "provider": info["provider"],
-        })
-        print("[update] initial_claims auto-updated", flush=True)
+            "statusNote": status_note,
+        }
 
     except Exception as error:
         error_message = str(error)
         mark_source_error(item, today, error_message)
-        update_employment_summary(data, {
+        print("[update] initial_claims source-error", flush=True)
+        return {
             "id": "initial_claims",
             "signal": "source-error",
             "score": 0,
@@ -819,63 +915,161 @@ def update_employment(data):
             "change": "source-error",
             "date": today,
             "provider": "source-error",
-        })
-        print("[update] initial_claims source-error", flush=True)
+            "statusNote": "source-error",
+        }
 
 
-def update_employment_summary(data, update):
-    signal = update["signal"]
-    score = update["score"]
-    status = "source-error" if signal == "source-error" else axis_status_from_score(score)
+def update_unemployment_rate(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
 
-    value = update["value"]
-    change = update["change"]
+    item = find_indicator(data, "unemployment_rate")
 
+    try:
+        result = fetch_unemployment_rate_with_fallback()
+
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change = round(current_value - previous_value, 4)
+        signal, score = unemployment_rate_signal(current_value, change)
+
+        interpretation = f"실업률 최신값은 {current_value:.1f}%입니다. 데이터 출처는 {result['provider']}입니다. 실업률은 후행성이 강하므로 신규 실업수당, NFP, 임금상승률과 함께 확인해야 합니다."
+        market_reaction = "실업률이 빠르게 상승하면 경기 둔화가 사후적으로 확인되는 구간일 수 있습니다. 반대로 낮고 안정적인 실업률은 소비 체력에는 우호적이지만, 금리 인하 기대를 약화시킬 수도 있습니다."
+        action = "실업률이 상승 추세로 전환되면 경기민감주와 고레버리지 성장주의 비중 확대를 늦추고, 방어주·현금 비중 점검을 강화합니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note="auto-updated",
+        )
+
+        print("[update] unemployment_rate auto-updated", flush=True)
+        return {
+            "id": "unemployment_rate",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "change": info["change"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": "auto-updated",
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] unemployment_rate source-error", flush=True)
+        return {
+            "id": "unemployment_rate",
+            "signal": "source-error",
+            "score": 0,
+            "value": "source-error",
+            "change": "source-error",
+            "date": today,
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_employment(data):
+    updates = [
+        update_initial_claims(data),
+        update_unemployment_rate(data),
+    ]
+    update_employment_summary(data, updates)
+
+
+def format_claims_value(value):
     if isinstance(value, (int, float)):
-        value_text = f"{value:,.0f}건"
-    else:
-        value_text = str(value)
+        return f"{value:,.0f}건"
+    return str(value)
 
-    if isinstance(change, (int, float)):
-        change_text = f"{change:+,.0f}건"
+
+def format_rate_value(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.1f}%"
+    return str(value)
+
+
+def format_claims_change(value):
+    if isinstance(value, (int, float)):
+        return f"{value:+,.0f}건"
+    return str(value)
+
+
+def format_rate_change(value):
+    if isinstance(value, (int, float)):
+        return f"{value:+.1f}%p"
+    return str(value)
+
+
+def update_employment_summary(data, updates):
+    by_id = {item["id"]: item for item in updates}
+    initial = by_id.get("initial_claims", {})
+    unemployment = by_id.get("unemployment_rate", {})
+
+    score = sum(item.get("score", 0) for item in updates)
+    all_source_error = all(item.get("signal") == "source-error" for item in updates)
+
+    if all_source_error:
+        status = "source-error"
     else:
-        change_text = str(change)
+        status = axis_status_from_score(score)
+
+    initial_signal = initial.get("signal", "source-error")
+    unemployment_signal = unemployment.get("signal", "source-error")
+
+    initial_value_text = format_claims_value(initial.get("value"))
+    initial_change_text = format_claims_change(initial.get("change"))
+    unemployment_value_text = format_rate_value(unemployment.get("value"))
+    unemployment_change_text = format_rate_change(unemployment.get("change"))
 
     data.setdefault("axisSummary", {})
     if "employment" in data["axisSummary"]:
         data["axisSummary"]["employment"].update({
             "status": status,
             "score": score,
-            "leadingStatus": signal,
+            "leadingStatus": initial_signal,
             "coincidentStatus": "warning",
-            "laggingStatus": "warning",
-            "summary": f"신규 실업수당 청구건수는 {value_text}, 전주 대비 {change_text}입니다.",
-            "interpretation": "고용 축에서는 신규 실업수당이 실업률보다 먼저 흔들릴 수 있는 선행 신호입니다. 단일 주간 수치보다 3~4주 방향성이 더 중요합니다.",
-            "action": "청구건수 상승이 반복되면 고용 냉각 시나리오를 강화하고, NFP·실업률·임금 상승률을 함께 확인합니다.",
+            "laggingStatus": unemployment_signal,
+            "summary": f"신규 실업수당은 {initial_value_text}, 실업률은 {unemployment_value_text}입니다.",
+            "interpretation": "고용 축에서는 신규 실업수당이 먼저 흔들리고, 실업률은 뒤늦게 경기 둔화를 확인합니다. 두 지표가 동시에 악화되면 고용 축의 부정 신호가 강화됩니다.",
+            "action": "신규 실업수당 상승과 실업률 상승이 함께 나타나면 경기민감주와 고레버리지 성장주의 비중 확대를 늦추고, 현금·방어주 비중을 점검합니다.",
         })
 
     data.setdefault("matrix", {})
     if "employment" in data["matrix"]:
         data["matrix"]["employment"].update({
-            "leading": signal,
+            "leading": initial_signal,
             "coincident": "warning",
-            "lagging": "warning",
+            "lagging": unemployment_signal,
         })
 
     data.setdefault("timingSummary", {})
     if "leading" in data["timingSummary"]:
         data["timingSummary"]["leading"].update({
-            "status": signal,
-            "summary": f"신규 실업수당 청구건수는 {value_text}, 전주 대비 {change_text}입니다. 고용 냉각의 초기 신호를 확인합니다.",
+            "status": initial_signal,
+            "summary": f"신규 실업수당은 {initial_value_text}, 전주 대비 {initial_change_text}입니다. 고용 냉각의 초기 신호를 확인합니다.",
+        })
+
+    if "lagging" in data["timingSummary"]:
+        data["timingSummary"]["lagging"].update({
+            "status": unemployment_signal,
+            "summary": f"실업률은 {unemployment_value_text}, 전월 대비 {unemployment_change_text}입니다. 고용 둔화가 사후적으로 확인되는지 봅니다.",
         })
 
     data.setdefault("marketSummary", {})
     data["marketSummary"].update({
         "marketCondition": "neutral",
-        "marketConditionLabel": "VIX + 금리 + 신규 실업수당 자동 업데이트 3단계",
+        "marketConditionLabel": "VIX + 금리 + 고용 자동 업데이트 4단계",
         "riskMode": "balanced",
-        "summary": "VIX, 2년물·10년물 금리, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
-        "conflictSummary": "현재는 변동성·금리·고용 선행 신호만 자동화된 상태입니다. 실적·자금흐름·소비·마진·달러/원자재 축과의 연결 판단은 다음 단계에서 확장합니다.",
+        "summary": "VIX, 2년물·10년물 금리, 신규 실업수당 청구건수, 실업률 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
+        "conflictSummary": "현재는 변동성·금리·고용 선행/후행 신호가 자동화된 상태입니다. 실적·자금흐름·소비·마진·달러/원자재 축과의 연결 판단은 다음 단계에서 확장합니다.",
         "watchAxes": ["rates", "employment", "flows", "volatility"],
     })
 
@@ -962,13 +1156,14 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-fallback-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수 자동 업데이트가 실행되었습니다.",
+            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
             "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
+            "실업률은 FRED UNRATE를 먼저 시도하고, 실패 시 BLS Public Data API LNS14000000을 사용합니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
@@ -989,7 +1184,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment safe auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment safe auto update", flush=True)
 
     data = load_data()
 
@@ -1006,7 +1201,7 @@ def main():
 
     save_data(data)
 
-    print("[done] VIX + rates + employment safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
