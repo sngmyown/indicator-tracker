@@ -20,6 +20,8 @@ TREASURY_YIELD_CURVE_BASE = "https://home.treasury.gov/resource-center/data-char
 DOL_AR539_CSV_URL = "https://oui.doleta.gov/unemploy/csv/ar539.csv"
 BLS_PUBLIC_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 BLS_UNRATE_SERIES_ID = "LNS14000000"
+STOOQ_WTI_URL = "https://stooq.com/q/d/l/?s=cl.f&i=d"
+STOOQ_DOLLAR_INDEX_URL = "https://stooq.com/q/d/l/?s=dx.f&i=d"
 
 
 def fred_url(series_id):
@@ -423,6 +425,40 @@ def unemployment_rate_signal(value, change):
 
     return "neutral", 0
 
+
+
+def dollar_index_signal(value, change_percent):
+    """달러 지수 해석 기준.
+
+    DTWEXBGS와 DXY 선물 프록시는 절대 레벨이 다르므로,
+    자동 점수는 절대값보다 단기 변화율을 중심으로 판단합니다.
+    달러 급등은 위험자산과 원자재에 부담으로 봅니다.
+    """
+    if change_percent >= 1.0:
+        return "negative", -1
+
+    if change_percent <= -1.0:
+        return "positive", 1
+
+    return "neutral", 0
+
+
+def wti_oil_signal(value, change_percent):
+    """WTI 원유 해석 기준.
+
+    유가 급등은 인플레이션 압력과 금리 부담으로 연결될 수 있습니다.
+    반대로 과도한 급락은 경기 둔화 신호일 수 있으므로 단순 긍정으로 보지 않습니다.
+    """
+    if value >= 90 or change_percent >= 5.0:
+        return "negative", -1
+
+    if value <= 55 or change_percent <= -7.0:
+        return "warning", 0
+
+    if 60 <= value <= 85 and abs(change_percent) < 5.0:
+        return "neutral", 0
+
+    return "neutral", 0
 
 def axis_status_from_score(score):
     if score > 0:
@@ -853,6 +889,54 @@ def fetch_unemployment_rate_with_fallback():
     return fetch_with_fallback("unemployment_rate", providers)
 
 
+
+def fetch_stooq_daily_close(url, series_name, label):
+    text = fetch_text(url, retries=1, timeout=8)
+    reader = csv.DictReader(StringIO(text))
+
+    rows = []
+    for row in reader:
+        rows.append({
+            "date": row.get("Date"),
+            "value": row.get("Close"),
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": label,
+        "series": series_name,
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": True,
+    }
+
+
+def fetch_dollar_index_with_fallback():
+    providers = [
+        ("FRED recent DTWEXBGS", lambda: fetch_fred_series_recent("DTWEXBGS", years_back=2)),
+        ("Stooq Dollar Index Futures proxy", lambda: fetch_stooq_daily_close(
+            STOOQ_DOLLAR_INDEX_URL,
+            "dx.f-proxy",
+            "Stooq Dollar Index Futures Proxy",
+        )),
+    ]
+
+    return fetch_with_fallback("dollar_index_proxy", providers)
+
+
+def fetch_wti_oil_with_fallback():
+    providers = [
+        ("FRED recent DCOILWTICO", lambda: fetch_fred_series_recent("DCOILWTICO", years_back=2)),
+        ("Stooq WTI Futures proxy", lambda: fetch_stooq_daily_close(
+            STOOQ_WTI_URL,
+            "cl.f-proxy",
+            "Stooq WTI Futures Proxy",
+        )),
+    ]
+
+    return fetch_with_fallback("wti_oil", providers)
+
 def update_initial_claims(data):
     now = datetime.now(KST)
     today = now.date().isoformat()
@@ -1074,6 +1158,209 @@ def update_employment_summary(data, updates):
     })
 
 
+
+def update_dollar_index(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+
+    item = find_indicator(data, "dollar_index_proxy")
+
+    try:
+        result = fetch_dollar_index_with_fallback()
+
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change_percent = percent_change(current_value, previous_value)
+        signal, score = dollar_index_signal(current_value, change_percent)
+
+        is_proxy = bool(result.get("isProxy"))
+        status_note = "proxy-auto-updated" if is_proxy else "auto-updated"
+
+        if is_proxy:
+            interpretation = f"달러 지수 프록시 최신값은 {current_value:.2f}입니다. 데이터 출처는 {result['provider']}입니다. 이 값은 FRED DTWEXBGS 실패 시 쓰는 달러 인덱스 선물 기반 프록시이므로, 미국 광의 달러지수와 완전히 동일하지 않습니다."
+            market_reaction = "달러 프록시가 빠르게 상승하면 글로벌 유동성 긴축, 원자재와 위험자산 부담을 경계합니다. 프록시 값은 방향 확인용으로 제한적으로 사용합니다."
+            action = "프록시 값만으로 비중을 크게 바꾸지 말고, 금리·원자재·VIX와 함께 확인합니다."
+        else:
+            interpretation = f"미국 광의 달러지수 최신값은 {current_value:.2f}입니다. 데이터 출처는 {result['provider']}입니다. 절대값보다 최근 변화율과 금리 방향을 함께 봅니다."
+            market_reaction = "달러가 빠르게 강해지면 글로벌 유동성과 원자재, 미국 외 매출 비중이 큰 기업에 부담이 될 수 있습니다. 달러 약세는 원자재와 다국적 기업에는 우호적일 수 있습니다."
+            action = "달러 강세가 금리 상승·VIX 상승과 동시에 나타나면 위험자산 추격 매수를 제한합니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note=status_note,
+        )
+
+        item["unit"] = "index"
+
+        print("[update] dollar_index_proxy auto-updated", flush=True)
+        return {
+            "id": "dollar_index_proxy",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "change": info["change"],
+            "changePercent": info["changePercent"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": status_note,
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] dollar_index_proxy source-error", flush=True)
+        return {
+            "id": "dollar_index_proxy",
+            "signal": "source-error",
+            "score": 0,
+            "value": "source-error",
+            "change": "source-error",
+            "changePercent": "source-error",
+            "date": today,
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_wti_oil(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+
+    item = find_indicator(data, "wti_oil")
+
+    try:
+        result = fetch_wti_oil_with_fallback()
+
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change_percent = percent_change(current_value, previous_value)
+        signal, score = wti_oil_signal(current_value, change_percent)
+
+        is_proxy = bool(result.get("isProxy"))
+        status_note = "proxy-auto-updated" if is_proxy else "auto-updated"
+
+        if is_proxy:
+            interpretation = f"WTI 원유 프록시 최신값은 {current_value:.2f}달러입니다. 데이터 출처는 {result['provider']}입니다. 이 값은 FRED DCOILWTICO 실패 시 쓰는 WTI 선물 기반 프록시입니다."
+            market_reaction = "WTI 프록시 급등은 인플레이션 압력과 금리 부담을 키울 수 있습니다. 프록시 값은 방향 확인용으로 사용합니다."
+            action = "유가 급등이 달러 강세·금리 상승과 동시에 나타나면 성장주와 소비 민감주의 추격 매수를 제한합니다."
+        else:
+            interpretation = f"WTI 원유 최신값은 {current_value:.2f}달러입니다. 데이터 출처는 {result['provider']}입니다. 유가 급등은 인플레이션 압력, 급락은 경기 수요 둔화 가능성으로 해석합니다."
+            market_reaction = "유가가 빠르게 오르면 인플레이션과 기업 비용 압력이 커질 수 있습니다. 반대로 과도한 급락은 경기 둔화 신호일 수 있습니다."
+            action = "WTI가 급등하면 에너지·운송·소비재 마진 압박을 확인하고, 달러와 금리 방향을 함께 봅니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note=status_note,
+        )
+
+        item["unit"] = "$/bbl"
+
+        print("[update] wti_oil auto-updated", flush=True)
+        return {
+            "id": "wti_oil",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "change": info["change"],
+            "changePercent": info["changePercent"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": status_note,
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] wti_oil source-error", flush=True)
+        return {
+            "id": "wti_oil",
+            "signal": "source-error",
+            "score": 0,
+            "value": "source-error",
+            "change": "source-error",
+            "changePercent": "source-error",
+            "date": today,
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_dollar_commodities(data):
+    updates = [
+        update_dollar_index(data),
+        update_wti_oil(data),
+    ]
+    update_dollar_commodities_summary(data, updates)
+
+
+def format_price_value(value, suffix=""):
+    if isinstance(value, (int, float)):
+        return f"{value:.2f}{suffix}"
+    return str(value)
+
+
+def update_dollar_commodities_summary(data, updates):
+    by_id = {item["id"]: item for item in updates}
+    dollar = by_id.get("dollar_index_proxy", {})
+    wti = by_id.get("wti_oil", {})
+
+    score = sum(item.get("score", 0) for item in updates)
+    all_source_error = all(item.get("signal") == "source-error" for item in updates)
+
+    if all_source_error:
+        status = "source-error"
+    else:
+        status = axis_status_from_score(score)
+
+    dollar_signal_value = dollar.get("signal", "source-error")
+    wti_signal_value = wti.get("signal", "source-error")
+
+    dollar_value_text = format_price_value(dollar.get("value"))
+    wti_value_text = format_price_value(wti.get("value"), "달러")
+
+    data.setdefault("axisSummary", {})
+    if "dollar-commodities" in data["axisSummary"]:
+        data["axisSummary"]["dollar-commodities"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": dollar_signal_value,
+            "coincidentStatus": wti_signal_value,
+            "laggingStatus": "not-applicable",
+            "summary": f"달러 지수는 {dollar_value_text}, WTI는 {wti_value_text}입니다.",
+            "interpretation": "달러와 원유는 글로벌 유동성, 인플레이션 압력, 경기 수요를 함께 보여주는 축입니다. 달러 강세와 유가 급등이 동시에 나타나면 위험자산에는 부담이 커질 수 있습니다.",
+            "action": "달러 강세·유가 급등·금리 상승이 동시에 나타나면 추격 매수를 줄이고, 섹터별 마진 압박을 확인합니다.",
+        })
+
+    data.setdefault("matrix", {})
+    if "dollar-commodities" in data["matrix"]:
+        data["matrix"]["dollar-commodities"].update({
+            "leading": dollar_signal_value,
+            "coincident": wti_signal_value,
+            "lagging": "not-applicable",
+        })
+
+    data.setdefault("marketSummary", {})
+    data["marketSummary"].update({
+        "marketCondition": "neutral",
+        "marketConditionLabel": "VIX + 금리 + 고용 + 달러/WTI 자동 업데이트 5단계",
+        "riskMode": "balanced",
+        "summary": "VIX, 2년물·10년물 금리, 신규 실업수당, 실업률, 달러 지수, WTI 자동 업데이트가 실행되었습니다. 아직 전체 8축 판단은 부분 자동화 상태입니다.",
+        "conflictSummary": "현재는 변동성·금리·고용·달러/원유 축이 자동화된 상태입니다. 실적·자금흐름·소비·마진·구리 축과의 연결 판단은 다음 단계에서 확장합니다.",
+        "watchAxes": ["rates", "employment", "dollar-commodities", "flows", "volatility"],
+    })
+
 def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date, provider):
     score = 0
 
@@ -1156,14 +1443,16 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률 자동 업데이트가 실행되었습니다.",
+            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
             "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
             "실업률은 FRED UNRATE를 먼저 시도하고, 실패 시 BLS Public Data API LNS14000000을 사용합니다.",
+            "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
+            "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Stooq WTI Futures 프록시를 사용합니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
@@ -1184,7 +1473,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment safe auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment + dollar/WTI safe auto update", flush=True)
 
     data = load_data()
 
@@ -1195,13 +1484,14 @@ def main():
     update_vix(data)
     update_rates(data)
     update_employment(data)
+    update_dollar_commodities(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment + dollar/WTI safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
