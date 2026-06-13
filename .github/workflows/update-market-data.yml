@@ -32,24 +32,18 @@ jobs:
         run: |
           echo "Current directory:"
           pwd
-
           echo "Root files:"
           ls -la
-
           echo "Data folder:"
           ls -la data || true
-
           echo "Scripts folder:"
           ls -la scripts || true
-
           echo "Check v1 schema before update:"
           grep -n '"schemaVersion"' data/latest.json || true
           grep -n '"meta"' data/latest.json || true
           grep -n '"indicators"' data/latest.json || true
-
           echo "Check currentValue fields before update:"
           grep -n '"currentValue"' data/latest.json | head -20 || true
-
           echo "Check statusNote fields before update:"
           grep -n '"statusNote"' data/latest.json | head -20 || true
 
@@ -69,11 +63,26 @@ jobs:
           grep -n '"currentValue"' data/latest.json | head -20
           grep -n '"statusNote"' data/latest.json | head -20
 
-          echo "Check important source series:"
-          grep -n 'VIXCLS' data/latest.json
-          grep -n 'DGS10' data/latest.json
-          grep -n 'DGS2' data/latest.json
-          grep -n 'ICSA' data/latest.json
+          echo "Check target indicator ids:"
+          grep -n '"id": "vix"' data/latest.json || true
+          grep -n '"id": "vix_change_rate"' data/latest.json || true
+          grep -n '"id": "us_2y_yield"' data/latest.json || true
+          grep -n '"id": "us_10y_yield"' data/latest.json || true
+
+          echo "Check optional source/series names:"
+          grep -n 'VIXCLS' data/latest.json || true
+          grep -n 'Yahoo Finance' data/latest.json || true
+          grep -n 'Stooq' data/latest.json || true
+          grep -n 'DGS10' data/latest.json || true
+          grep -n 'DGS2' data/latest.json || true
+          grep -n 'U.S. Treasury' data/latest.json || true
+          grep -n 'Treasury' data/latest.json || true
+          grep -n 'ICSA' data/latest.json || true
+
+          echo "Check automation status markers:"
+          grep -n 'vix-rates-update-v1' data/latest.json || true
+          grep -n 'vix-fallback-update-v1' data/latest.json || true
+          grep -n 'vix-auto-update-v1' data/latest.json || true
 
           echo "Check automation result markers:"
           grep -n 'auto-updated' data/latest.json || true
@@ -103,15 +112,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           echo "Git status before add:"
           git status --short
-
           git add data/latest.json
-
           echo "Git status after add:"
           git status --short
-
           if git diff --cached --quiet; then
             echo "No staged changes to commit."
           else
@@ -119,6 +124,5 @@ jobs:
             git pull --rebase
             git push
           fi
-
           echo "Git status after push:"
           git status --short
