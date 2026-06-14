@@ -33,6 +33,19 @@ BLS_CPI_SA_SERIES_ID = "CUSR0000SA0"
 BLS_CPI_NSA_SERIES_ID = "CUUR0000SA0"
 
 
+YAHOO_SPY_URL = "https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=1mo&interval=1d"
+YAHOO_QQQ_URL = "https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=1mo&interval=1d"
+YAHOO_IWM_URL = "https://query1.finance.yahoo.com/v8/finance/chart/IWM?range=1mo&interval=1d"
+YAHOO_SQQQ_URL = "https://query1.finance.yahoo.com/v8/finance/chart/SQQQ?range=1mo&interval=1d"
+YAHOO_GOLD_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF?range=1mo&interval=1d"
+
+STOOQ_SPY_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
+STOOQ_QQQ_URL = "https://stooq.com/q/d/l/?s=qqq.us&i=d"
+STOOQ_IWM_URL = "https://stooq.com/q/d/l/?s=iwm.us&i=d"
+STOOQ_SQQQ_URL = "https://stooq.com/q/d/l/?s=sqqq.us&i=d"
+STOOQ_GOLD_URL = "https://stooq.com/q/d/l/?s=gc.f&i=d"
+
+
 def fred_url(series_id):
     return FRED_BASE + series_id
 
@@ -2253,6 +2266,744 @@ def update_volatility_source_error(data, error_message):
         })
 
 
+
+# -----------------------------------------------------------------------------
+# Remaining auto-updatable indicators
+# -----------------------------------------------------------------------------
+
+
+def fetch_fred_recent_rows(series_id, years_back=8):
+    now = datetime.now(KST)
+    start_year = max(1900, now.year - years_back)
+    start_date = f"{start_year}-01-01"
+    url = f"{fred_url(series_id)}&cosd={start_date}"
+    text = fetch_text(url, retries=2, timeout=10)
+    reader = csv.DictReader(StringIO(text))
+
+    rows = []
+    for row in reader:
+        date = row.get("observation_date")
+        raw_value = row.get(series_id)
+        if not date or raw_value in (None, "", "."):
+            continue
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        rows.append({"date": str(date)[:10], "value": value})
+
+    rows.sort(key=lambda row: row["date"])
+    if len(rows) < 2:
+        raise ValueError(f"{series_id} 유효 데이터가 2개 미만입니다.")
+    return rows, url
+
+
+def fetch_fred_monthly_change(series_id, years_back=5):
+    """Fetch a FRED monthly level series and convert it to month-over-month level change.
+
+    PAYEMS는 고용자 수 레벨 계열이므로, 시장 해석에는 최신 레벨보다 전월 대비 증감이 더 유용합니다.
+    currentValue는 최신 월간 변화량, previousValue는 직전 월간 변화량입니다.
+    """
+    rows, url = fetch_fred_recent_rows(series_id, years_back=years_back)
+    change_rows = []
+    for index in range(1, len(rows)):
+        current = rows[index]
+        previous = rows[index - 1]
+        change_rows.append({
+            "date": current["date"],
+            "value": round(current["value"] - previous["value"], 4),
+        })
+
+    latest, previous = latest_two_from_rows(change_rows)
+    return {
+        "provider": "FRED monthly change calculation",
+        "series": f"{series_id}-MoM-change",
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
+def safe_numeric_from_indicator(data, indicator_id):
+    try:
+        value = find_indicator(data, indicator_id).get("currentValue")
+    except Exception:
+        return None
+    return value if is_number(value) else None
+
+
+def ten_two_spread_signal(value):
+    if value < 0:
+        return "negative", -1
+    if value < 0.25:
+        return "warning", 0
+    if value >= 0.75:
+        return "positive", 1
+    return "neutral", 0
+
+
+def real_yield_signal(value, change):
+    if value >= 2.25 or change >= 0.15:
+        return "negative", -1
+    if value <= 1.25 or change <= -0.15:
+        return "positive", 1
+    return "neutral", 0
+
+
+def fed_funds_signal(value, change):
+    if value >= 5.0 or change >= 0.10:
+        return "negative", -1
+    if value <= 4.0 or change <= -0.10:
+        return "positive", 1
+    return "neutral", 0
+
+
+def payrolls_signal(value):
+    if value < 50000:
+        return "negative", -1
+    if value >= 150000:
+        return "positive", 1
+    return "neutral", 0
+
+
+def wage_yoy_signal(value):
+    if value >= 4.5:
+        return "negative", -1
+    if value <= 3.2:
+        return "positive", 1
+    return "neutral", 0
+
+
+def flow_proxy_signal(indicator_id, change_percent):
+    if indicator_id == "sqqq_flow_proxy":
+        if change_percent >= 1.0:
+            return "negative", -1
+        if change_percent <= -1.0:
+            return "positive", 1
+        return "neutral", 0
+
+    if change_percent >= 0.5:
+        return "positive", 1
+    if change_percent <= -0.5:
+        return "negative", -1
+    return "neutral", 0
+
+
+def credit_card_delinquency_signal(value, change):
+    if value >= 4.0 or change >= 0.30:
+        return "negative", -1
+    if value <= 3.0 and change <= 0.10:
+        return "positive", 1
+    return "neutral", 0
+
+
+def ppi_yoy_signal(value):
+    if value >= 4.0:
+        return "negative", -1
+    if value <= 2.0:
+        return "positive", 1
+    return "neutral", 0
+
+
+def pass_through_signal(value):
+    if value <= -1.0:
+        return "negative", -1
+    if value >= 0.5:
+        return "positive", 1
+    return "neutral", 0
+
+
+def gold_price_signal(value, change_percent):
+    # 금은 위험자산 선호 지표라기보다 헤지 수요 지표이므로 점수는 보수적으로 둡니다.
+    if change_percent >= 2.0:
+        return "warning", 0
+    if change_percent <= -2.0:
+        return "neutral", 0
+    return "neutral", 0
+
+
+def fetch_flow_proxy_with_fallback(indicator_id):
+    configs = {
+        "spy_flow_proxy": {
+            "yahoo_url": YAHOO_SPY_URL,
+            "yahoo_series": "SPY",
+            "stooq_url": STOOQ_SPY_URL,
+            "stooq_series": "spy.us",
+            "label": "SPY ETF price flow proxy",
+        },
+        "qqq_flow_proxy": {
+            "yahoo_url": YAHOO_QQQ_URL,
+            "yahoo_series": "QQQ",
+            "stooq_url": STOOQ_QQQ_URL,
+            "stooq_series": "qqq.us",
+            "label": "QQQ ETF price flow proxy",
+        },
+        "iwm_flow_proxy": {
+            "yahoo_url": YAHOO_IWM_URL,
+            "yahoo_series": "IWM",
+            "stooq_url": STOOQ_IWM_URL,
+            "stooq_series": "iwm.us",
+            "label": "IWM ETF price flow proxy",
+        },
+        "sqqq_flow_proxy": {
+            "yahoo_url": YAHOO_SQQQ_URL,
+            "yahoo_series": "SQQQ",
+            "stooq_url": STOOQ_SQQQ_URL,
+            "stooq_series": "sqqq.us",
+            "label": "SQQQ inverse ETF hedge proxy",
+        },
+    }
+
+    config = configs[indicator_id]
+    providers = [
+        (f"Yahoo Finance {config['yahoo_series']} proxy", lambda: fetch_yahoo_chart_close(
+            config["yahoo_url"],
+            f"{config['yahoo_series']}-close-proxy",
+            f"Yahoo Finance {config['label']}",
+        )),
+        (f"Stooq {config['stooq_series']} proxy", lambda: fetch_stooq_daily_close(
+            config["stooq_url"],
+            f"{config['stooq_series']}-close-proxy",
+            f"Stooq {config['label']}",
+        )),
+    ]
+    return fetch_with_fallback(indicator_id, providers)
+
+
+def fetch_gold_price_with_fallback():
+    providers = [
+        ("Yahoo Finance Gold Futures GC=F proxy", lambda: fetch_yahoo_chart_close(
+            YAHOO_GOLD_URL,
+            "GC=F-gold-futures-proxy",
+            "Yahoo Finance Gold Futures Proxy",
+        )),
+        ("Stooq Gold Futures proxy", lambda: fetch_stooq_daily_close(
+            STOOQ_GOLD_URL,
+            "gc.f-gold-futures-proxy",
+            "Stooq Gold Futures Proxy",
+        )),
+    ]
+    return fetch_with_fallback("gold_price_proxy", providers)
+
+
+def update_ten_two_spread(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "ten_two_spread")
+
+    ten_year = safe_numeric_from_indicator(data, "us_10y_yield")
+    two_year = safe_numeric_from_indicator(data, "us_2y_yield")
+
+    if ten_year is None or two_year is None:
+        mark_source_error(item, today, "10년물 또는 2년물 금리 값이 숫자가 아니어서 스프레드를 계산할 수 없습니다.")
+        return {"id": "ten_two_spread", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+    previous_ten = find_indicator(data, "us_10y_yield").get("previousValue")
+    previous_two = find_indicator(data, "us_2y_yield").get("previousValue")
+    if is_number(previous_ten) and is_number(previous_two):
+        previous_value = round(previous_ten - previous_two, 4)
+    else:
+        previous_value = item.get("currentValue") if is_number(item.get("currentValue")) else 0
+
+    current_value = round(ten_year - two_year, 4)
+    change = round(current_value - previous_value, 4) if is_number(previous_value) else 0
+    signal, score = ten_two_spread_signal(current_value)
+    direction = direction_from_change(change)
+    actual_date = find_indicator(data, "us_10y_yield").get("actualDate") or today
+
+    item.update({
+        "source": "Derived from DGS10 and DGS2",
+        "sourceSeries": "DGS10-DGS2-derived",
+        "sourceUrl": find_indicator(data, "us_10y_yield").get("sourceUrl", "derived"),
+        "currentValue": current_value,
+        "previousValue": previous_value,
+        "unit": "%p",
+        "actualDate": actual_date,
+        "direction": direction,
+        "change": change,
+        "changePercent": 0,
+        "signal": signal,
+        "score": score,
+        "interpretation": f"10년물-2년물 금리 스프레드는 {current_value:.2f}%p입니다. 음수이면 장단기 금리 역전으로 경기 침체 경고 신호로 봅니다.",
+        "marketReaction": "스프레드 역전은 즉시 침체를 뜻하지는 않지만, 고용과 소비가 둔화될 때 경기 리스크 해석을 강화합니다.",
+        "action": "스프레드 역전 구간에서는 고용·소비·신용 지표와 함께 방어적 포지션 비중을 점검합니다.",
+        "statusNote": "auto-updated",
+    })
+    return {"id": "ten_two_spread", "signal": signal, "score": score, "value": current_value, "statusNote": "auto-updated"}
+
+
+def update_real_10y_yield(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "real_10y_yield")
+    try:
+        result = fetch_fred_series_recent("DFII10", years_back=2)
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        change = round(current - previous, 4)
+        signal, score = real_yield_signal(current, change)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"10년 실질금리 최신값은 {current:.2f}%입니다. 실질금리 상승은 성장주 멀티플과 금·장기채에 부담이 될 수 있습니다.",
+            "실질금리가 높고 상승하면 위험자산에는 할인율 부담이 커집니다.",
+            "실질금리 상승 구간에서는 고PER 성장주 추격을 줄이고, 금리 안정 여부를 확인합니다.",
+        ) | {"id": "real_10y_yield", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "real_10y_yield", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_fed_funds_rate(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "fed_funds_rate")
+    try:
+        result = fetch_fred_series_recent("DFF", years_back=2)
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        change = round(current - previous, 4)
+        signal, score = fed_funds_signal(current, change)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"Effective Fed Funds Rate 최신값은 {current:.2f}%입니다. 기준금리의 실제 적용 수준을 확인하는 동행 지표입니다.",
+            "정책금리가 높게 유지되면 유동성·밸류에이션 부담이 지속됩니다.",
+            "금리 인하 기대만 보지 말고 실제 단기 정책금리와 2년물 금리의 방향을 함께 봅니다.",
+        ) | {"id": "fed_funds_rate", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "fed_funds_rate", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_generic_indicator(item, result, signal, score, interpretation, market_reaction, action, status_note="auto-updated"):
+    info = update_indicator_success(item, result, signal, score, interpretation, market_reaction, action, status_note=status_note)
+    return {
+        "value": info["currentValue"],
+        "change": info["change"],
+        "changePercent": info["changePercent"],
+        "date": info["actualDate"],
+        "provider": info["provider"],
+    }
+
+
+def update_extra_rates(data):
+    updates = [
+        update_ten_two_spread(data),
+        update_real_10y_yield(data),
+        update_fed_funds_rate(data),
+    ]
+
+    # 기존 2년물·10년물까지 포함해서 금리축 요약을 다시 정리합니다.
+    ids = ["us_2y_yield", "us_10y_yield", "ten_two_spread", "real_10y_yield", "fed_funds_rate"]
+    score = 0
+    signals = []
+    details = []
+    for indicator_id in ids:
+        try:
+            item = find_indicator(data, indicator_id)
+        except Exception:
+            continue
+        if item.get("signal") != "source-error":
+            score += item.get("score", 0) if is_number(item.get("score")) else 0
+            signals.append(item.get("signal", "neutral"))
+        details.append(f"{indicator_id}: {item.get('currentValue')}")
+
+    status = axis_status_from_score(score)
+    if "rates" in data.get("axisSummary", {}):
+        data["axisSummary"]["rates"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": status,
+            "coincidentStatus": find_indicator(data, "fed_funds_rate").get("signal", "neutral"),
+            "laggingStatus": "not-applicable",
+            "summary": " / ".join(details),
+            "interpretation": "금리축은 2년물·10년물·장단기 스프레드·실질금리·정책금리를 함께 봅니다. 방향보다 금리 변화의 이유가 더 중요합니다.",
+            "action": "금리와 실질금리가 동시에 상승하면 성장주 추격을 제한하고, 금리 안정과 스프레드 정상화 여부를 확인합니다.",
+        })
+    if "rates" in data.get("matrix", {}):
+        data["matrix"]["rates"].update({"leading": status, "coincident": find_indicator(data, "fed_funds_rate").get("signal", "neutral"), "lagging": "not-applicable"})
+
+
+def update_nonfarm_payrolls(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "nonfarm_payrolls")
+    try:
+        result = fetch_fred_monthly_change("PAYEMS", years_back=5)
+        current = result["latest"]["value"]
+        signal, score = payrolls_signal(current)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"비농업 고용자 수 변화는 {current:,.0f}천 명입니다. FRED PAYEMS 레벨 계열의 전월 대비 변화량으로 계산했습니다.",
+            "고용 증가가 15만 명 이상이면 소비 체력에는 우호적입니다. 급격한 둔화는 경기 냉각 신호입니다.",
+            "NFP가 둔화되면 신규 실업수당과 실업률 상승 여부를 함께 확인합니다.",
+        ) | {"id": "nonfarm_payrolls", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "nonfarm_payrolls", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_average_hourly_earnings(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "average_hourly_earnings")
+    try:
+        result = fetch_fred_monthly_yoy("CES0500000003", years_back=6)
+        current = result["latest"]["value"]
+        signal, score = wage_yoy_signal(current)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"시간당 평균 임금 YoY는 {current:.2f}%입니다. 임금은 소비 여력과 인플레이션 압력을 동시에 보여줍니다.",
+            "임금 상승률이 높으면 소비에는 긍정적이지만, 인플레이션과 금리 부담에는 부정적일 수 있습니다.",
+            "임금 상승률이 높게 유지되면 연준의 금리 인하 지연 가능성과 기업 마진 압박을 함께 봅니다.",
+        ) | {"id": "average_hourly_earnings", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "average_hourly_earnings", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_extra_employment(data):
+    updates = [update_nonfarm_payrolls(data), update_average_hourly_earnings(data)]
+    ids = ["initial_claims", "unemployment_rate", "nonfarm_payrolls", "average_hourly_earnings"]
+    score = 0
+    details = []
+    for indicator_id in ids:
+        item = find_indicator(data, indicator_id)
+        if item.get("signal") != "source-error":
+            score += item.get("score", 0) if is_number(item.get("score")) else 0
+        details.append(f"{indicator_id}: {item.get('currentValue')}")
+    status = axis_status_from_score(score)
+    if "employment" in data.get("axisSummary", {}):
+        data["axisSummary"]["employment"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": find_indicator(data, "initial_claims").get("signal", "neutral"),
+            "coincidentStatus": axis_status_from_score(sum(find_indicator(data, i).get("score", 0) if is_number(find_indicator(data, i).get("score")) else 0 for i in ["nonfarm_payrolls", "average_hourly_earnings"])),
+            "laggingStatus": find_indicator(data, "unemployment_rate").get("signal", "neutral"),
+            "summary": " / ".join(details),
+            "interpretation": "고용축은 신규 실업수당, NFP, 임금, 실업률을 함께 봅니다. 선행 악화와 후행 악화가 동시에 나타나면 경기 둔화 신호가 강해집니다.",
+            "action": "고용축 악화가 소비축 악화와 겹치면 경기민감주·고레버리지 성장주 비중 확대를 늦춥니다.",
+        })
+    if "employment" in data.get("matrix", {}):
+        data["matrix"]["employment"].update({
+            "leading": find_indicator(data, "initial_claims").get("signal", "neutral"),
+            "coincident": data["axisSummary"]["employment"].get("coincidentStatus", "neutral"),
+            "lagging": find_indicator(data, "unemployment_rate").get("signal", "neutral"),
+        })
+
+
+def update_single_flow_proxy(data, indicator_id, display_name):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, indicator_id)
+    try:
+        result = fetch_flow_proxy_with_fallback(indicator_id)
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        change_percent = percent_change(current, previous)
+        signal, score = flow_proxy_signal(indicator_id, change_percent)
+        info = update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"{display_name} 가격 흐름 프록시 최신값은 {current:.2f}, 전일 대비 변화율은 {change_percent:.2f}%입니다. 이는 실제 ETF 자금 유입액이 아니라 가격 기반 수급 프록시입니다.",
+            "가격 기반 프록시는 실제 fund flow보다 약하지만, 위험선호와 상대강도 확인에는 사용할 수 있습니다.",
+            "프록시 수급은 단독 판단하지 말고 거래량·섹터 ETF·지수 추세와 함께 확인합니다.",
+            status_note="proxy-auto-updated",
+        )
+        return {"id": indicator_id, "signal": signal, "score": score, "value": info["value"], "changePercent": info["changePercent"], "statusNote": "proxy-auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": indicator_id, "signal": "source-error", "score": 0, "value": item.get("currentValue"), "changePercent": "source-error", "statusNote": "source-error"}
+
+
+def update_flows(data):
+    updates = [
+        update_single_flow_proxy(data, "spy_flow_proxy", "SPY"),
+        update_single_flow_proxy(data, "qqq_flow_proxy", "QQQ"),
+        update_single_flow_proxy(data, "iwm_flow_proxy", "IWM"),
+        update_single_flow_proxy(data, "sqqq_flow_proxy", "SQQQ"),
+    ]
+    score = sum(item.get("score", 0) for item in updates if item.get("signal") != "source-error")
+    status = axis_status_from_score(score)
+    details = " / ".join(f"{item['id']}: {item.get('value')}" for item in updates)
+    leading_scores = [item.get("score", 0) for item in updates if item["id"] in ("qqq_flow_proxy", "iwm_flow_proxy", "sqqq_flow_proxy") and item.get("signal") != "source-error"]
+    leading_status = axis_status_from_score(sum(leading_scores)) if leading_scores else "source-error"
+    if "flows" in data.get("axisSummary", {}):
+        data["axisSummary"]["flows"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": leading_status,
+            "coincidentStatus": find_indicator(data, "spy_flow_proxy").get("signal", "neutral"),
+            "laggingStatus": "not-applicable",
+            "summary": details,
+            "interpretation": "자금 흐름 축은 현재 실제 ETF fund flow가 아니라 ETF 가격 기반 프록시입니다. SPY·QQQ·IWM 상승은 위험선호, SQQQ 상승은 헤지 수요 증가로 해석합니다.",
+            "action": "프록시가 강하면 다음 단계에서 실제 ETF flow 또는 거래량 데이터를 보강합니다. SQQQ가 급등하면 단기 방어 모드로 봅니다.",
+        })
+    if "flows" in data.get("matrix", {}):
+        data["matrix"]["flows"].update({"leading": leading_status, "coincident": find_indicator(data, "spy_flow_proxy").get("signal", "neutral"), "lagging": "not-applicable"})
+
+
+def update_credit_card_delinquency(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "credit_card_delinquency")
+    try:
+        result = fetch_fred_series_recent("DRCCLACBS", years_back=8)
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        change = round(current - previous, 4)
+        signal, score = credit_card_delinquency_signal(current, change)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"신용카드 연체율은 {current:.2f}%입니다. 3% 이하는 소비 신용 여건이 안정적인 구간으로 보고, 상승 추세는 소비 둔화 리스크로 봅니다.",
+            "연체율 상승은 소비 여력 약화와 리테일/임의소비재 부담으로 연결될 수 있습니다.",
+            "연체율이 상승하면 소매판매와 고용 지표를 함께 확인하고 소비 민감주 추격을 제한합니다.",
+        ) | {"id": "credit_card_delinquency", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "credit_card_delinquency", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_extra_consumption(data):
+    update = update_credit_card_delinquency(data)
+    # 기존 소비축 요약에 후행 신용 지표를 추가 반영합니다.
+    try:
+        current_summary = data.get("axisSummary", {}).get("consumption", {}).get("summary", "")
+        cc_item = find_indicator(data, "credit_card_delinquency")
+        if "consumption" in data.get("axisSummary", {}):
+            data["axisSummary"]["consumption"].update({
+                "laggingStatus": cc_item.get("signal", "neutral"),
+                "summary": f"{current_summary} / 신용카드 연체율: {cc_item.get('currentValue')}",
+            })
+        if "consumption" in data.get("matrix", {}):
+            data["matrix"]["consumption"]["lagging"] = cc_item.get("signal", "neutral")
+    except Exception as error:
+        print(f"[consumption-summary] credit card delinquency summary update skipped: {error}", flush=True)
+
+
+def update_ppi_yoy(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "ppi_yoy")
+    try:
+        result = fetch_fred_monthly_yoy("PPIACO", years_back=8)
+        current = result["latest"]["value"]
+        signal, score = ppi_yoy_signal(current)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"PPI YoY는 {current:.2f}%입니다. 생산자물가는 기업 원가 압박의 선행 신호로 봅니다.",
+            "PPI가 CPI보다 빠르게 오르면 마진 압박 가능성이 커집니다.",
+            "PPI 상승률이 재가속되면 원자재·임금·가격전가력을 함께 확인합니다.",
+        ) | {"id": "ppi_yoy", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "ppi_yoy", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_wage_cost_yoy(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "wage_cost_yoy")
+    try:
+        result = fetch_fred_monthly_yoy("CES0500000003", years_back=6)
+        current = result["latest"]["value"]
+        signal, score = wage_yoy_signal(current)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"임금 비용 YoY는 {current:.2f}%입니다. 임금 상승은 서비스 인플레이션과 기업 마진 압박의 핵심 변수입니다.",
+            "임금 상승률이 높으면 가격전가력이 약한 기업의 마진 압박이 커질 수 있습니다.",
+            "임금 상승률이 높게 유지되면 컨퍼런스콜의 cost pressure, labor cost 언급을 함께 확인합니다.",
+        ) | {"id": "wage_cost_yoy", "signal": signal, "score": score, "statusNote": "auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "wage_cost_yoy", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_cpi_ppi_pass_through(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "cpi_ppi_pass_through")
+    cpi = safe_numeric_from_indicator(data, "cpi_yoy")
+    ppi = safe_numeric_from_indicator(data, "ppi_yoy")
+    if cpi is None or ppi is None:
+        mark_source_error(item, today, "CPI YoY 또는 PPI YoY가 숫자가 아니어서 가격전가 프록시를 계산할 수 없습니다.")
+        return {"id": "cpi_ppi_pass_through", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+    current = round(cpi - ppi, 4)
+    previous = item.get("currentValue") if is_number(item.get("currentValue")) else 0
+    change = round(current - previous, 4) if is_number(previous) else 0
+    signal, score = pass_through_signal(current)
+    item.update({
+        "source": "Derived from CPIAUCSL-YoY and PPIACO-YoY",
+        "sourceSeries": "CPIAUCSL-YoY-minus-PPIACO-YoY",
+        "sourceUrl": find_indicator(data, "cpi_yoy").get("sourceUrl", "derived"),
+        "currentValue": current,
+        "previousValue": previous,
+        "unit": "%p",
+        "actualDate": find_indicator(data, "cpi_yoy").get("actualDate", today),
+        "direction": direction_from_change(change),
+        "change": change,
+        "changePercent": 0,
+        "signal": signal,
+        "score": score,
+        "interpretation": f"CPI-PPI 가격전가 프록시는 {current:.2f}%p입니다. CPI가 PPI보다 높으면 가격전가 여지가 있고, PPI가 CPI보다 높으면 마진 압박 가능성이 큽니다.",
+        "marketReaction": "가격전가 프록시가 음수이면 비용 상승을 소비자 가격으로 넘기기 어려운 구간일 수 있습니다.",
+        "action": "프록시가 악화되면 기업 실적 발표의 margin headwinds, cost pressure, pricing power 언급을 확인합니다.",
+        "statusNote": "auto-updated",
+    })
+    return {"id": "cpi_ppi_pass_through", "signal": signal, "score": score, "value": current, "statusNote": "auto-updated"}
+
+
+def update_margins(data):
+    updates = [update_ppi_yoy(data), update_wage_cost_yoy(data), update_cpi_ppi_pass_through(data)]
+    score = sum(item.get("score", 0) for item in updates if item.get("signal") != "source-error")
+    status = axis_status_from_score(score)
+    details = " / ".join(f"{item['id']}: {item.get('value')}" for item in updates)
+    if "margins" in data.get("axisSummary", {}):
+        data["axisSummary"]["margins"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": axis_status_from_score(sum(find_indicator(data, i).get("score", 0) if is_number(find_indicator(data, i).get("score")) else 0 for i in ["ppi_yoy", "wage_cost_yoy"])),
+            "coincidentStatus": find_indicator(data, "cpi_ppi_pass_through").get("signal", "neutral"),
+            "laggingStatus": "manual-required",
+            "summary": details,
+            "interpretation": "마진축은 PPI, 임금, CPI-PPI 가격전가 프록시를 통해 비용 압박과 가격결정력을 봅니다. 실제 기업 마진은 실적 발표와 컨퍼런스콜에서 확인해야 합니다.",
+            "action": "PPI·임금 상승이 재가속되고 가격전가 프록시가 악화되면 마진 취약 기업의 비중 확대를 제한합니다.",
+        })
+    if "margins" in data.get("matrix", {}):
+        data["matrix"]["margins"].update({
+            "leading": data["axisSummary"]["margins"].get("leadingStatus", "neutral"),
+            "coincident": find_indicator(data, "cpi_ppi_pass_through").get("signal", "neutral"),
+            "lagging": "manual-required",
+        })
+
+
+def update_gold_price_proxy(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "gold_price_proxy")
+    try:
+        result = fetch_gold_price_with_fallback()
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        change_percent = percent_change(current, previous)
+        signal, score = gold_price_signal(current, change_percent)
+        info = update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"금 가격 프록시 최신값은 {current:.2f}입니다. 데이터 출처는 {result['provider']}입니다. 금은 통화 헤지와 위험 회피 수요를 함께 반영합니다.",
+            "금 급등은 달러·실질금리·지정학 리스크와 함께 해석해야 합니다.",
+            "금은 추세 전환 확인 후 접근하고, 단기 급등만으로 위험자산 전체 판단을 바꾸지 않습니다.",
+            status_note="proxy-auto-updated",
+        )
+        return {"id": "gold_price_proxy", "signal": signal, "score": score, "value": info["value"], "statusNote": "proxy-auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "gold_price_proxy", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_extra_dollar_commodities(data):
+    update_gold_price_proxy(data)
+    ids = ["dollar_index_proxy", "wti_oil", "copper_price", "gold_price_proxy"]
+    score = 0
+    details = []
+    for indicator_id in ids:
+        item = find_indicator(data, indicator_id)
+        if item.get("signal") != "source-error":
+            score += item.get("score", 0) if is_number(item.get("score")) else 0
+        details.append(f"{indicator_id}: {item.get('currentValue')}")
+    status = axis_status_from_score(score)
+    if "dollar-commodities" in data.get("axisSummary", {}):
+        data["axisSummary"]["dollar-commodities"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": axis_status_from_score(sum(find_indicator(data, i).get("score", 0) if is_number(find_indicator(data, i).get("score")) else 0 for i in ["dollar_index_proxy", "copper_price"])),
+            "coincidentStatus": find_indicator(data, "wti_oil").get("signal", "neutral"),
+            "laggingStatus": find_indicator(data, "gold_price_proxy").get("signal", "neutral"),
+            "summary": " / ".join(details),
+            "interpretation": "달러·WTI·구리·금은 유동성, 인플레이션 압력, 경기 수요, 헤지 수요를 함께 보여줍니다.",
+            "action": "달러 강세와 유가 급등이 동시에 나타나면 위험자산 추격을 제한하고, 구리 강세와 달러 안정이 함께 나타나면 경기민감 섹터를 관찰합니다.",
+        })
+    if "dollar-commodities" in data.get("matrix", {}):
+        data["matrix"]["dollar-commodities"].update({
+            "leading": data["axisSummary"]["dollar-commodities"].get("leadingStatus", "neutral"),
+            "coincident": find_indicator(data, "wti_oil").get("signal", "neutral"),
+            "lagging": find_indicator(data, "gold_price_proxy").get("signal", "neutral"),
+        })
+
+
+def update_all_remaining_auto_indicators(data):
+    print("[remaining] update extra rates", flush=True)
+    update_extra_rates(data)
+    print("[remaining] update extra employment", flush=True)
+    update_extra_employment(data)
+    print("[remaining] update flows", flush=True)
+    update_flows(data)
+    print("[remaining] update credit card delinquency", flush=True)
+    update_extra_consumption(data)
+    print("[remaining] update margins", flush=True)
+    update_margins(data)
+    print("[remaining] update gold price proxy", flush=True)
+    update_extra_dollar_commodities(data)
+
+
+def update_unautomated_manual_notes(data):
+    """Mark structurally manual indicators clearly.
+
+    실적 beat rate, M7 가이던스, 컨센서스 리비전, ISM PMI, pricing power 멘트,
+    VIX 선물 구조, Fear & Greed Index는 안정적인 무료 JSON 소스가 없거나 해석형 데이터입니다.
+    이들은 현재 자동화 대상이 아니라 수동 확인 대상으로 명확히 남깁니다.
+    """
+    manual_ids = [
+        "eps_beat_rate",
+        "revenue_beat_rate",
+        "m7_guidance_change",
+        "consensus_revision",
+        "ism_manufacturing_pmi",
+        "pricing_power_mentions",
+        "vix_futures_structure",
+        "fear_greed_index",
+    ]
+    for indicator_id in manual_ids:
+        try:
+            item = find_indicator(data, indicator_id)
+        except Exception:
+            continue
+        if item.get("statusNote") in ("auto-updated", "proxy-auto-updated"):
+            continue
+        item.update({
+            "currentValue": item.get("currentValue", "manual-required"),
+            "statusNote": "manual-required",
+            "signal": item.get("signal", "manual-required"),
+            "score": item.get("score", 0) if is_number(item.get("score")) else 0,
+            "interpretation": item.get("interpretation") or "이 지표는 원천 데이터의 신뢰성 또는 해석 난이도 때문에 현재 수동 확인 대상으로 남깁니다.",
+            "action": item.get("action") or "주간 리서치 루틴에서 직접 확인하고, 추후 안정적인 데이터 소스가 생기면 자동화합니다.",
+        })
+
 def update_meta(data):
     now = datetime.now(KST)
 
@@ -2261,25 +3012,22 @@ def update_meta(data):
         "updatedAt": now.isoformat(timespec="seconds"),
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
-        "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-mom-yoy-fix-v1",
+        "dataStatus": "partial-plus",
+        "automationStatus": "full-auto-broad-indicators-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격, 소비축 지표 자동 업데이트가 실행되었습니다.",
-            "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
-            "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
-            "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
-            "실업률은 FRED UNRATE를 먼저 시도하고, 실패 시 BLS Public Data API LNS14000000을 사용합니다.",
-            "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
-            "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq WTI Futures 프록시를 사용합니다.",
-            "구리 가격은 FRED PCOPPUSDM을 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq Copper Futures 프록시를 사용합니다.",
-            "소매판매 YoY는 FRED RSXFS를 기반으로 계산합니다. FRED 실패 시 Census 발표문에서 MoM이 아니라 YoY 문장만 추출합니다.",
-            "Retail Sales - CPI 프록시는 소매판매 YoY에서 CPI YoY를 뺀 값으로, 소비가 인플레이션을 이기는지 확인하는 파생 지표입니다.",
+            "VIX, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
+            "이번 버전은 기존 VIX·2년물·10년물·신규 실업수당·실업률·달러·WTI·구리·소비 지표에 나머지 자동화 가능한 지표를 추가합니다.",
+            "추가 금리 지표: 10Y-2Y 스프레드, 10년 실질금리, Effective Fed Funds Rate.",
+            "추가 고용 지표: 비농업 고용자 수 변화, 시간당 평균 임금 YoY.",
+            "자금흐름 축은 실제 ETF fund flow가 아니라 SPY/QQQ/IWM/SQQQ 가격 기반 프록시로 먼저 자동화했습니다.",
+            "추가 소비 지표: 신용카드 연체율.",
+            "마진 축: PPI YoY, 임금 비용 YoY, CPI-PPI 가격전가 프록시.",
+            "추가 원자재 지표: 금 가격 프록시.",
+            "실적 beat rate, M7 가이던스, 컨센서스 리비전, ISM PMI, pricing power 멘트, VIX 선물 구조, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
-            "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
     })
-
 
 def assert_no_null(value, path="root"):
     if value is None:
@@ -2295,7 +3043,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption MoM/YoY parsing fix auto update", flush=True)
+    print("[start] broad remaining auto indicator update", flush=True)
 
     data = load_data()
 
@@ -2308,14 +3056,17 @@ def main():
     update_employment(data)
     update_dollar_commodities(data)
     update_consumption(data)
+
+    update_all_remaining_auto_indicators(data)
+    update_unautomated_manual_notes(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption MoM/YoY parsing fix completed", flush=True)
-    print("[done] latest.json should contain auto-updated or source-error", flush=True)
+    print("[done] broad remaining auto indicator update completed", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-v1", flush=True)
 
 
 if __name__ == "__main__":
