@@ -326,6 +326,127 @@ function injectCurrentValueStyles() {
       color: #fff2c2;
     }
 
+
+
+    .live-score-card {
+      border-color: rgba(255, 255, 255, 0.18);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.035));
+    }
+
+    .live-score-card .metric-value {
+      color: #ffffff;
+      text-shadow: 0 1px 16px rgba(255, 255, 255, 0.12);
+    }
+
+
+
+    .scenario-card {
+      border-color: rgba(255, 255, 255, 0.18);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.070), rgba(255, 255, 255, 0.030));
+    }
+
+    .scenario-card.primary-scenario {
+      border-color: rgba(34, 197, 94, 0.38);
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.13), rgba(255, 255, 255, 0.035));
+    }
+
+    .scenario-card.defensive-scenario {
+      border-color: rgba(239, 68, 68, 0.34);
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.11), rgba(255, 255, 255, 0.030));
+    }
+
+    .scenario-card.neutral-scenario {
+      border-color: rgba(148, 163, 184, 0.30);
+      background: linear-gradient(135deg, rgba(148, 163, 184, 0.10), rgba(255, 255, 255, 0.030));
+    }
+
+    .scenario-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .scenario-title-row h3 {
+      margin: 0;
+    }
+
+    .scenario-rank {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 850;
+      color: #ffffff;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      white-space: nowrap;
+    }
+
+    .scenario-list {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: rgba(255, 255, 255, 0.84);
+      line-height: 1.55;
+      font-size: 0.92rem;
+    }
+
+    .scenario-list li + li {
+      margin-top: 5px;
+    }
+
+    .scenario-section-label {
+      display: block;
+      margin-top: 12px;
+      margin-bottom: 4px;
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 0.78rem;
+      font-weight: 850;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .axis-mini-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .axis-mini-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 750;
+      background: rgba(255, 255, 255, 0.075);
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      color: rgba(255, 255, 255, 0.82);
+    }
+
+    .axis-mini-pill.positive {
+      color: #d8ffe4;
+      background: rgba(34, 197, 94, 0.12);
+      border-color: rgba(34, 197, 94, 0.28);
+    }
+
+    .axis-mini-pill.negative {
+      color: #ffe1e1;
+      background: rgba(239, 68, 68, 0.12);
+      border-color: rgba(239, 68, 68, 0.28);
+    }
+
+    .axis-mini-pill.neutral {
+      color: #ffffff;
+      background: rgba(148, 163, 184, 0.12);
+      border-color: rgba(148, 163, 184, 0.24);
+    }
+
     @media (max-width: 640px) {
       .current-value-strong {
         min-width: 88px;
@@ -357,6 +478,318 @@ function indicatorsByTiming(data, timing) {
   return data.indicators.filter(item => item.timing === timing || item.timing?.includes(timing));
 }
 
+
+function countSignals(items) {
+  const counts = {
+    positive: 0,
+    neutral: 0,
+    negative: 0,
+    warning: 0,
+    manual: 0,
+    error: 0,
+    pending: 0,
+    automated: 0,
+    total: items.length
+  };
+
+  items.forEach(item => {
+    const statusNote = item.statusNote || "";
+    const signal = item.signal || "neutral";
+
+    if (statusNote === "manual-required") counts.manual += 1;
+    if (statusNote === "source-error") counts.error += 1;
+    if (statusNote === "auto-pending") counts.pending += 1;
+    if (statusNote === "auto-updated" || statusNote === "proxy-auto-updated") counts.automated += 1;
+
+    if (signal === "positive") counts.positive += 1;
+    else if (signal === "negative") counts.negative += 1;
+    else if (signal === "warning") counts.warning += 1;
+    else counts.neutral += 1;
+  });
+
+  return counts;
+}
+
+function deriveAxisStatus(items) {
+  const active = items.filter(item => !["manual-required", "auto-pending", "source-error"].includes(item.statusNote));
+  if (!active.length) return "manual-required";
+
+  const c = countSignals(active);
+  const bearishWeight = c.negative + c.warning * 0.75;
+  const bullishWeight = c.positive;
+
+  if (bearishWeight >= bullishWeight + 1) return "negative";
+  if (bullishWeight >= bearishWeight + 1) return "positive";
+  return "neutral";
+}
+
+function computeLiveAxisScore(data) {
+  const axes = AXIS_ORDER.map(axisId => {
+    const axisMeta = data.axisSummary?.[axisId] || {};
+    const items = indicatorsByAxis(data, axisId);
+    const status = deriveAxisStatus(items);
+    const counts = countSignals(items);
+    return {
+      axisId,
+      name: axisMeta.name || axisId,
+      status,
+      counts,
+      items
+    };
+  });
+
+  const axisCounts = {
+    positive: axes.filter(axis => axis.status === "positive").length,
+    neutral: axes.filter(axis => axis.status === "neutral").length,
+    negative: axes.filter(axis => axis.status === "negative").length,
+    manual: axes.filter(axis => axis.status === "manual-required").length
+  };
+
+  const allCounts = countSignals(data.indicators || []);
+  const conflictAxes = axes.filter(axis => {
+    const active = axis.items.filter(item => !["manual-required", "auto-pending", "source-error"].includes(item.statusNote));
+    const c = countSignals(active);
+    return c.positive > 0 && (c.negative > 0 || c.warning > 0);
+  });
+
+  let regime = "혼조 / 변동성 장세";
+  let riskMode = "neutral";
+  let actionBias = "선별 진입 + 현금 유지";
+  let cashGuide = "현금 30~45% 유지. 긍정 축과 부정 축이 충돌하므로 분할 대응.";
+
+  if (axisCounts.positive >= 4 && axisCounts.negative <= 2) {
+    regime = "위험자산 우호 / 강세 가능성";
+    riskMode = "positive";
+    actionBias = "우위 섹터 중심 분할 진입";
+    cashGuide = "현금 20~30% 유지. 단, 과열 신호가 커지면 추격 매수 제한.";
+  }
+
+  if (axisCounts.negative >= 4) {
+    regime = "방어 우선 / 약세 가능성";
+    riskMode = "negative";
+    actionBias = "비중 축소 + 현금 방어";
+    cashGuide = "현금 45~60% 이상 검토. 신규 진입은 상대강도 높은 섹터로 제한.";
+  }
+
+  const automatedRatio = allCounts.total ? Math.round((allCounts.automated / allCounts.total) * 100) : 0;
+
+  return {
+    axes,
+    axisCounts,
+    allCounts,
+    conflictAxes,
+    regime,
+    riskMode,
+    actionBias,
+    cashGuide,
+    automatedRatio
+  };
+}
+
+function renderLiveAxisScoreCard(live) {
+  const conflictNames = live.conflictAxes.length
+    ? live.conflictAxes.map(axis => axis.name).slice(0, 4).join(", ")
+    : "뚜렷한 축 내부 충돌 없음";
+
+  return `
+    <article class="card live-score-card">
+      <h3>실시간 8축 스코어</h3>
+      <div class="metric-value">+${live.axisCounts.positive} / 0${live.axisCounts.neutral} / -${live.axisCounts.negative}</div>
+      <p class="muted">자동 계산 기준. 수동 확인 축 ${live.axisCounts.manual}개.</p>
+      <div class="badge-row">
+        ${badge("positive", `긍정축 ${live.axisCounts.positive}`)}
+        ${badge("neutral", `중립축 ${live.axisCounts.neutral}`)}
+        ${badge("negative", `부정축 ${live.axisCounts.negative}`)}
+      </div>
+    </article>
+    <article class="card live-score-card">
+      <h3>자동 판정 시장 국면</h3>
+      <div class="metric-value">${escapeHtml(live.regime)}</div>
+      ${badge(live.riskMode, live.riskMode === "positive" ? "위험선호 우세" : live.riskMode === "negative" ? "방어 우세" : "혼조")}
+      <p class="muted">사용자 8축 기준: 4축 이상 긍정/부정 여부를 우선 반영.</p>
+    </article>
+    <article class="card live-score-card">
+      <h3>데이터 품질</h3>
+      <div class="metric-value">${live.automatedRatio}%</div>
+      <p class="muted">자동 업데이트 ${live.allCounts.automated}개 / 전체 ${live.allCounts.total}개</p>
+      <div class="badge-row">
+        ${badge("manual-required", `수동 ${live.allCounts.manual}`)}
+        ${badge("source-error", `오류 ${live.allCounts.error}`)}
+      </div>
+    </article>
+    <article class="card live-score-card">
+      <h3>실행 바이어스</h3>
+      <div class="metric-value">${escapeHtml(live.actionBias)}</div>
+      <p class="muted">${escapeHtml(live.cashGuide)}</p>
+      <p class="muted">충돌 축: ${escapeHtml(conflictNames)}</p>
+    </article>
+  `;
+}
+
+
+function getIndicator(data, id) {
+  return (data.indicators || []).find(item => item.id === id);
+}
+
+function activeSignalLabel(item) {
+  if (!item) return "확인 필요";
+  const value = formatValue(item.currentValue, item.unit);
+  return `${item.name}: ${value} · ${labelStatus(item.signal)} · ${item.statusNote || "상태 미확인"}`;
+}
+
+function axisPills(axes, status) {
+  return axes
+    .filter(axis => axis.status === status)
+    .map(axis => `<span class="axis-mini-pill ${escapeHtml(status)}">${escapeHtml(axis.name)}</span>`)
+    .join("") || `<span class="axis-mini-pill neutral">해당 축 없음</span>`;
+}
+
+function buildScenarioPlan(data, live) {
+  const positive = live.axisCounts.positive;
+  const negative = live.axisCounts.negative;
+  const neutral = live.axisCounts.neutral;
+
+  let primary = "base";
+  if (positive >= 4 && negative <= 2) primary = "bull";
+  if (negative >= 4) primary = "bear";
+
+  const vix = getIndicator(data, "vix");
+  const real10y = getIndicator(data, "real_10y_yield");
+  const spread = getIndicator(data, "ten_two_spread");
+  const claims = getIndicator(data, "initial_claims");
+  const unrate = getIndicator(data, "unemployment_rate");
+  const retailReal = getIndicator(data, "real_retail_sales_proxy");
+  const dollar = getIndicator(data, "dollar_index_proxy");
+  const wti = getIndicator(data, "wti_oil");
+
+  const commonSignals = [
+    activeSignalLabel(vix),
+    activeSignalLabel(real10y),
+    activeSignalLabel(claims),
+    activeSignalLabel(retailReal)
+  ];
+
+  return [
+    {
+      key: "bull",
+      cardClass: primary === "bull" ? "primary-scenario" : "scenario-card",
+      rank: primary === "bull" ? "현재 우선 시나리오" : "대기 시나리오",
+      badgeStatus: "positive",
+      title: "상승 지속 시나리오",
+      thesis: "금리·고용·소비·변동성 중 4축 이상이 긍정으로 유지되면 위험자산 우호 국면으로 판단한다.",
+      triggers: [
+        `긍정축 4개 이상 유지. 현재 +${positive} / 0${neutral} / -${negative}.`,
+        "VIX가 골디락스 존 안에서 안정되고 급등하지 않을 것.",
+        "실질금리 또는 10년물이 재상승하지 않고 멀티플 압박이 제한될 것.",
+        "소비 프록시가 0%p 이상이거나 고용 악화 신호가 제한될 것."
+      ],
+      actions: [
+        "현금 20~30%를 유지하면서 상대강도 높은 섹터 중심으로 분할 진입.",
+        "추격 매수보다 눌림·지지 확인 후 진입. 기존 강세 섹터의 리더를 우선 검토.",
+        "SQQQ 등 헤지 프록시가 강해지면 신규 진입 속도 축소."
+      ],
+      watch: commonSignals
+    },
+    {
+      key: "base",
+      cardClass: primary === "base" ? "primary-scenario neutral-scenario" : "scenario-card neutral-scenario",
+      rank: primary === "base" ? "현재 우선 시나리오" : "대기 시나리오",
+      badgeStatus: "neutral",
+      title: "혼조·구간 대응 시나리오",
+      thesis: "긍정축과 부정축이 동시에 존재하면 방향 예측보다 구간별 비중 조절을 우선한다.",
+      triggers: [
+        `긍정/부정 축이 명확히 한쪽으로 쏠리지 않음. 현재 +${positive} / 0${neutral} / -${negative}.`,
+        "금리 또는 달러/원자재가 위험자산과 충돌하는 신호를 낼 것.",
+        "선행지표는 개선되지만 후행지표가 아직 따라오지 않는 전환 구간일 것.",
+        "주가 지수는 강하지만 소비·마진·고용 중 일부가 약해지는 상태."
+      ],
+      actions: [
+        "현금 30~45% 유지. 신규 진입은 소액·분할·상대강도 우위 종목으로 제한.",
+        "비중 조절과 종목 교체를 분리. 시장 판단이 애매할수록 한 번에 크게 움직이지 않음.",
+        "축 내부 충돌이 큰 영역은 관찰 대상으로 두고, 확정 신호 2~3개가 쌓일 때만 증액."
+      ],
+      watch: [
+        activeSignalLabel(spread),
+        activeSignalLabel(dollar),
+        activeSignalLabel(wti),
+        activeSignalLabel(retailReal)
+      ]
+    },
+    {
+      key: "bear",
+      cardClass: primary === "bear" ? "primary-scenario defensive-scenario" : "scenario-card defensive-scenario",
+      rank: primary === "bear" ? "현재 우선 시나리오" : "대기 시나리오",
+      badgeStatus: "negative",
+      title: "방어 전환 시나리오",
+      thesis: "부정축이 4개 이상으로 늘어나거나 변동성·고용·소비가 동시에 악화되면 방어를 우선한다.",
+      triggers: [
+        `부정축 4개 이상. 현재 부정축 ${negative}개.`,
+        "VIX 급등, SQQQ 상승, SPY/QQQ/IWM 약세가 동시에 나타날 것.",
+        "신규 실업수당과 실업률이 동시에 악화되며 고용축이 부정으로 전환될 것.",
+        "Retail Sales - CPI 프록시가 음수로 악화되고 PPI·임금 비용이 마진을 압박할 것."
+      ],
+      actions: [
+        "현금 45~60% 이상 검토. 신규 매수보다 손실 한도와 논리 붕괴 조건을 먼저 점검.",
+        "스윙 계좌는 비중 축소·헤지·관찰 대기 중심. 장기 계좌는 추가매수 조건을 더 엄격히 적용.",
+        "반등이 나와도 축 개선이 없으면 기술적 반등으로 보고 추격을 제한."
+      ],
+      watch: [
+        activeSignalLabel(vix),
+        activeSignalLabel(claims),
+        activeSignalLabel(unrate),
+        activeSignalLabel(retailReal)
+      ]
+    }
+  ];
+}
+
+function renderScenarioCard(scenario) {
+  return `
+    <article class="card scenario-card ${escapeHtml(scenario.cardClass)}">
+      <div class="scenario-title-row">
+        <h3>${escapeHtml(scenario.title)}</h3>
+        <span class="scenario-rank">${escapeHtml(scenario.rank)}</span>
+      </div>
+      ${badge(scenario.badgeStatus, labelStatus(scenario.badgeStatus))}
+      <p class="muted">${escapeHtml(scenario.thesis)}</p>
+      <span class="scenario-section-label">발동 조건</span>
+      <ul class="scenario-list">
+        ${scenario.triggers.map(item => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+      <span class="scenario-section-label">대응 원칙</span>
+      <ul class="scenario-list">
+        ${scenario.actions.map(item => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+      <span class="scenario-section-label">핵심 확인 신호</span>
+      <ul class="scenario-list">
+        ${scenario.watch.map(item => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    </article>
+  `;
+}
+
+function renderScenarioActionPlan(data, live) {
+  const scenarios = buildScenarioPlan(data, live);
+  return `
+    <article class="card live-score-card">
+      <h3>긍정 축</h3>
+      <div class="axis-mini-list">${axisPills(live.axes, "positive")}</div>
+      <p class="muted">강한 축은 신규 진입 후보를 좁히는 상위 필터로 사용.</p>
+    </article>
+    <article class="card live-score-card">
+      <h3>부정 축</h3>
+      <div class="axis-mini-list">${axisPills(live.axes, "negative")}</div>
+      <p class="muted">부정 축은 현금 비중과 손실 한도를 결정하는 방어 필터로 사용.</p>
+    </article>
+    <article class="card live-score-card">
+      <h3>중립 축</h3>
+      <div class="axis-mini-list">${axisPills(live.axes, "neutral")}</div>
+      <p class="muted">중립 축은 다음 방향 전환 신호를 기다리는 관찰 영역.</p>
+    </article>
+    ${scenarios.map(renderScenarioCard).join("")}
+  `;
+}
+
 function renderMeta(data) {
   const meta = data.meta || {};
   $("metaPanel").innerHTML = `
@@ -382,17 +815,20 @@ function renderMeta(data) {
 function renderOverview(data) {
   const m = data.marketSummary || {};
   const t = data.timingSummary || {};
+  const live = computeLiveAxisScore(data);
 
   $("summaryGrid").innerHTML = `
+    ${renderLiveAxisScoreCard(live)}
+    ${renderScenarioActionPlan(data, live)}
     <article class="card">
-      <h3>현재 시장 국면</h3>
+      <h3>기존 시장 국면 메모</h3>
       <div class="metric-value">${escapeHtml(m.marketConditionLabel || "확인 필요")}</div>
       ${badge(m.riskMode || "neutral", m.riskMode || "balanced")}
     </article>
     <article class="card">
-      <h3>8축 판정</h3>
+      <h3>기존 8축 판정</h3>
       <div class="metric-value">+${m.positiveAxes ?? 0} / 0${m.neutralAxes ?? 0} / -${m.negativeAxes ?? 0}</div>
-      <p class="muted">긍정 / 중립 / 부정 축 개수</p>
+      <p class="muted">latest.json에 저장된 긍정 / 중립 / 부정 축 개수</p>
     </article>
     <article class="card">
       <h3>시간성 신호</h3>
@@ -403,14 +839,16 @@ function renderOverview(data) {
       </div>
     </article>
     <article class="card">
-      <h3>액션 바이어스</h3>
+      <h3>기존 액션 바이어스</h3>
       <div class="metric-value">${escapeHtml(m.actionBias || "확인 필요")}</div>
       <p class="muted">현금 가이드: ${escapeHtml(m.cashRatioGuide || "확인 필요")}</p>
     </article>
   `;
 
-  $("marketNarrative").textContent = m.summary || "시장 요약이 없습니다.";
-  $("conflictNarrative").textContent = m.conflictSummary || "축 간 충돌 요약이 없습니다.";
+  $("marketNarrative").textContent = `자동 판정: ${live.regime}. ${live.cashGuide}`;
+  $("conflictNarrative").textContent = live.conflictAxes.length
+    ? `축 내부 충돌 감지: ${live.conflictAxes.map(axis => axis.name).join(", ")}. 긍정 신호와 부정/경고 신호가 같은 축 안에서 동시에 존재합니다.`
+    : (m.conflictSummary || "현재 자동 신호 기준으로 뚜렷한 축 내부 충돌은 제한적입니다.");
 }
 
 function renderAxes(data) {
