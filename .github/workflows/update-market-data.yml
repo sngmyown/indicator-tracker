@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: market-data-update-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update-market-data:
     runs-on: ubuntu-latest
@@ -22,6 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,91 +43,155 @@ jobs:
           ls -la data || true
           echo "Scripts folder:"
           ls -la scripts || true
-          echo "Check v1 schema before update:"
-          grep -n '"schemaVersion"' data/latest.json || true
-          grep -n '"meta"' data/latest.json || true
-          grep -n '"indicators"' data/latest.json || true
-          echo "Check currentValue fields before update:"
-          grep -n '"currentValue"' data/latest.json | head -20 || true
-          echo "Check statusNote fields before update:"
-          grep -n '"statusNote"' data/latest.json | head -20 || true
+          echo "Workflow folder:"
+          ls -la .github/workflows || true
+          echo "Check latest.json header:"
+          head -5 data/latest.json || true
 
       - name: Update latest market data
         run: python scripts/update_market_data.py
 
       - name: Verify updated latest.json
         run: |
-          echo "Check v1 schema:"
-          grep -n '"schemaVersion"' data/latest.json
-          grep -n '"meta"' data/latest.json
-          grep -n '"marketSummary"' data/latest.json
-          grep -n '"timingSummary"' data/latest.json
-          grep -n '"axisSummary"' data/latest.json
-          grep -n '"matrix"' data/latest.json
-          grep -n '"indicators"' data/latest.json
-          grep -n '"currentValue"' data/latest.json | head -20
-          grep -n '"statusNote"' data/latest.json | head -20
+          python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
 
-          echo "Check target indicator ids:"
-          grep -n '"id": "vix"' data/latest.json || true
-          grep -n '"id": "vix_change_rate"' data/latest.json || true
-          grep -n '"id": "us_2y_yield"' data/latest.json || true
-          grep -n '"id": "us_10y_yield"' data/latest.json || true
+          path = Path("data/latest.json")
+          raw = path.read_text(encoding="utf-8")
 
-          echo "Check optional source/series names:"
-          grep -n 'VIXCLS' data/latest.json || true
-          grep -n 'Yahoo Finance' data/latest.json || true
-          grep -n 'Stooq' data/latest.json || true
-          grep -n 'DGS10' data/latest.json || true
-          grep -n 'DGS2' data/latest.json || true
-          grep -n 'U.S. Treasury' data/latest.json || true
-          grep -n 'Treasury' data/latest.json || true
-          grep -n 'ICSA' data/latest.json || true
+          if raw.lstrip().startswith("import "):
+              print("ERROR: data/latest.json contains Python code, not JSON.")
+              sys.exit(1)
 
-          echo "Check automation status markers:"
-          grep -n 'vix-rates-update-v1' data/latest.json || true
-          grep -n 'vix-fallback-update-v1' data/latest.json || true
-          grep -n 'vix-auto-update-v1' data/latest.json || true
+          try:
+              data = json.loads(raw)
+          except Exception as exc:
+              print(f"ERROR: data/latest.json is not valid JSON: {exc}")
+              sys.exit(1)
 
-          echo "Check automation result markers:"
-          grep -n 'auto-updated' data/latest.json || true
-          grep -n 'proxy-auto-updated' data/latest.json || true
-          grep -n 'source-error' data/latest.json || true
+          required_top = [
+              "schemaVersion",
+              "meta",
+              "marketSummary",
+              "timingSummary",
+              "axisSummary",
+              "matrix",
+              "indicators",
+          ]
+          missing = [key for key in required_top if key not in data]
+          if missing:
+              print(f"ERROR: Missing top-level keys: {missing}")
+              sys.exit(1)
 
-          echo "Require at least one v1 update result:"
-          if grep -E '"statusNote": "(auto-updated|proxy-auto-updated|source-error)"' data/latest.json; then
-            echo "v1 update result marker found."
-          else
-            echo "ERROR: No v1 update result marker found. update_market_data.py did not update indicator values."
-            exit 1
-          fi
+          indicators = data.get("indicators")
+          if not isinstance(indicators, list) or not indicators:
+              print("ERROR: indicators must be a non-empty list.")
+              sys.exit(1)
 
-          echo "Reject old v0 fields:"
-          if grep -n '"freshnessStatus"' data/latest.json; then
-            echo "ERROR: old v0 field freshnessStatus remains."
-            exit 1
-          fi
+          allowed_status = {
+              "auto-updated",
+              "proxy-auto-updated",
+              "source-error",
+              "auto-pending",
+              "manual-required",
+          }
 
-          if grep -n '"actual":' data/latest.json; then
-            echo "ERROR: old v0 field actual remains."
-            exit 1
-          fi
+          updated_count = 0
+          source_error_count = 0
+          numeric_count = 0
+
+          print("Automation status:", data.get("meta", {}).get("automationStatus"))
+          print("Indicator status snapshot:")
+
+          watch_ids = {
+              "vix",
+              "us_2y_yield",
+              "us_10y_yield",
+              "initial_claims",
+              "unemployment_rate",
+              "dollar_index_proxy",
+              "wti_oil",
+              "copper_price",
+              "retail_sales_yoy",
+              "cpi_yoy",
+              "real_retail_sales_proxy",
+          }
+
+          for item in indicators:
+              item_id = item.get("id", "")
+              current_value = item.get("currentValue")
+              status_note = item.get("statusNote")
+
+              if status_note not in allowed_status:
+                  print(f"ERROR: invalid statusNote for {item_id}: {status_note}")
+                  sys.exit(1)
+
+              if status_note in {"auto-updated", "proxy-auto-updated"}:
+                  updated_count += 1
+              if status_note == "source-error":
+                  source_error_count += 1
+              if isinstance(current_value, (int, float)):
+                  numeric_count += 1
+
+              if item_id in watch_ids:
+                  print(f"- {item_id}: currentValue={current_value!r}, statusNote={status_note!r}")
+
+          if updated_count + source_error_count < 1:
+              print("ERROR: No auto-updated/proxy-auto-updated/source-error marker found.")
+              sys.exit(1)
+
+          if numeric_count < 1:
+              print("ERROR: No numeric currentValue found. The update did not produce usable data.")
+              sys.exit(1)
+
+          def contains_key(obj, target):
+              if isinstance(obj, dict):
+                  if target in obj:
+                      return True
+                  return any(contains_key(value, target) for value in obj.values())
+              if isinstance(obj, list):
+                  return any(contains_key(value, target) for value in obj)
+              return False
+
+          for old_key in ["freshnessStatus", "actual"]:
+              if contains_key(data, old_key):
+                  print(f"ERROR: old v0 field remains: {old_key}")
+                  sys.exit(1)
+
+          print("latest.json verification passed.")
+          PY
 
       - name: Commit and push updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "Save generated latest.json before syncing with origin/main"
+          cp data/latest.json /tmp/latest.json
+
+          echo "Sync working tree with latest origin/main to avoid rebase conflicts"
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+
+          echo "Restore generated latest.json onto latest origin/main"
+          mkdir -p data
+          cp /tmp/latest.json data/latest.json
+
           echo "Git status before add:"
           git status --short
           git add data/latest.json
           echo "Git status after add:"
           git status --short
+
           if git diff --cached --quiet; then
             echo "No staged changes to commit."
           else
             git commit -m "Update v1 market dashboard data"
-            git pull --rebase
-            git push
+            git push origin main
           fi
+
           echo "Git status after push:"
           git status --short
