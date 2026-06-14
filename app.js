@@ -1,4 +1,5 @@
 const DATA_URL = `data/latest.json?ts=${Date.now()}`;
+const HISTORY_URL = `data/history.json?ts=${Date.now()}`;
 
 const AXIS_ORDER = [
   "rates",
@@ -100,6 +101,7 @@ const MANUAL_SIGNAL_OPTIONS = [
 
 let APP_RAW_DATA = null;
 let APP_VIEW_DATA = null;
+let APP_HISTORY_DATA = null;
 
 
 function $(id) {
@@ -672,6 +674,57 @@ function injectCurrentValueStyles() {
       margin-top: 4px;
     }
 
+
+    .history-card {
+      border-color: rgba(96, 165, 250, 0.22);
+    }
+
+    .history-card .metric-value.small {
+      font-size: 1.15rem;
+      line-height: 1.35;
+    }
+
+    .history-delta-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .history-delta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .history-delta-name {
+      color: rgba(255, 255, 255, 0.78);
+      font-weight: 750;
+      font-size: 0.86rem;
+    }
+
+    .history-delta-value {
+      color: #ffffff;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .history-delta-positive {
+      color: #86efac;
+    }
+
+    .history-delta-negative {
+      color: #fca5a5;
+    }
+
+    .history-delta-neutral {
+      color: #e5e7eb;
+    }
+
     @media (max-width: 640px) {
       .current-value-strong {
         min-width: 88px;
@@ -1051,7 +1104,139 @@ function renderMeta(data) {
   }
 }
 
-function renderOverview(data) {
+
+function getHistorySnapshots(history) {
+  if (!history || !Array.isArray(history.snapshots)) return [];
+  return history.snapshots.filter(Boolean);
+}
+
+function getSnapshotIndicator(snapshot, id) {
+  return (snapshot?.keyIndicators || []).find(item => item.id === id);
+}
+
+function numericOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function formatDeltaNumber(value, unit = "") {
+  const numeric = numericOrNull(value);
+  if (numeric === null) return "-";
+  const sign = numeric > 0 ? "+" : "";
+  const absValue = Math.abs(numeric);
+  const decimals = absValue >= 100 ? 0 : absValue >= 10 ? 2 : 2;
+  const suffix = unit && !["index", "manual", "none"].includes(unit) ? ` ${unit}` : "";
+  return `${sign}${numeric.toFixed(decimals)}${suffix}`;
+}
+
+function deltaClass(delta) {
+  const numeric = numericOrNull(delta);
+  if (numeric === null || Math.abs(numeric) < 0.00001) return "history-delta-neutral";
+  return numeric > 0 ? "history-delta-positive" : "history-delta-negative";
+}
+
+function renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, id, label, unitOverride = null) {
+  const latest = getSnapshotIndicator(latestSnapshot, id);
+  const previous = getSnapshotIndicator(previousSnapshot, id);
+  const latestValue = numericOrNull(latest?.currentValue);
+  const previousValue = numericOrNull(previous?.currentValue);
+  const unit = unitOverride ?? latest?.unit ?? previous?.unit ?? "";
+
+  if (latestValue === null || previousValue === null) {
+    return `
+      <div class="history-delta-row">
+        <span class="history-delta-name">${escapeHtml(label)}</span>
+        <span class="history-delta-value history-delta-neutral">비교 대기</span>
+      </div>
+    `;
+  }
+
+  const delta = latestValue - previousValue;
+  return `
+    <div class="history-delta-row">
+      <span class="history-delta-name">${escapeHtml(label)}</span>
+      <span class="history-delta-value ${deltaClass(delta)}">${formatDeltaNumber(delta, unit)}</span>
+    </div>
+  `;
+}
+
+function renderAxisCountDelta(label, currentValue, previousValue, status) {
+  const delta = Number(currentValue || 0) - Number(previousValue || 0);
+  return `
+    <div class="history-delta-row">
+      <span class="history-delta-name">${escapeHtml(label)}</span>
+      <span class="history-delta-value ${deltaClass(delta)}">${previousValue ?? 0} → ${currentValue ?? 0} (${formatDeltaNumber(delta)})</span>
+    </div>
+  `;
+}
+
+function renderHistoryOverview(data, history, live) {
+  const snapshots = getHistorySnapshots(history);
+  const latestSnapshot = snapshots[snapshots.length - 1];
+  const previousSnapshot = snapshots[snapshots.length - 2];
+
+  if (!latestSnapshot) {
+    return `
+      <article class="card history-card">
+        <h3>히스토리 저장 상태</h3>
+        <div class="metric-value small">대기 중</div>
+        <p class="muted">data/history.json이 아직 없거나 스냅샷이 없습니다. 다음 데이터 업데이트 후 주간 변화 추적이 시작됩니다.</p>
+      </article>
+    `;
+  }
+
+  const currentCounts = latestSnapshot.axisCounts || live.axisCounts || {};
+  const previousCounts = previousSnapshot?.axisCounts || {};
+  const previousRegime = previousSnapshot?.marketRegime || "이전 기록 없음";
+  const currentRegime = latestSnapshot.marketRegime || live.regime || "확인 필요";
+
+  const axisDeltaBody = previousSnapshot ? `
+        ${renderAxisCountDelta("긍정 축", currentCounts.positive, previousCounts.positive, "positive")}
+        ${renderAxisCountDelta("중립 축", currentCounts.neutral, previousCounts.neutral, "neutral")}
+        ${renderAxisCountDelta("부정 축", currentCounts.negative, previousCounts.negative, "negative")}
+      ` : `
+        <div class="history-delta-row">
+          <span class="history-delta-name">비교 기준</span>
+          <span class="history-delta-value history-delta-neutral">첫 스냅샷 저장 완료</span>
+        </div>
+      `;
+
+  return `
+    <article class="card history-card">
+      <h3>히스토리 저장 상태</h3>
+      <div class="metric-value small">${escapeHtml(String(snapshots.length))}회 기록</div>
+      <p class="muted">최신 스냅샷: ${escapeHtml(latestSnapshot.updatedAt || latestSnapshot.date || "확인 필요")}</p>
+      <p class="muted">저장 파일: data/history.json</p>
+    </article>
+
+    <article class="card history-card">
+      <h3>전회 대비 8축 변화</h3>
+      <div class="history-delta-list">
+        ${axisDeltaBody}
+      </div>
+    </article>
+
+    <article class="card history-card">
+      <h3>시장 국면 변화</h3>
+      <div class="metric-value small">${escapeHtml(currentRegime)}</div>
+      <p class="muted">이전: ${escapeHtml(previousRegime)}</p>
+      <p class="muted">${escapeHtml(latestSnapshot.cashGuide || "현금 비중 가이드는 다음 스냅샷부터 비교합니다.")}</p>
+    </article>
+
+    <article class="card history-card">
+      <h3>핵심 지표 변화</h3>
+      <div class="history-delta-list">
+        ${renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, "vix", "VIX")}
+        ${renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, "us_10y_yield", "10년물 금리")}
+        ${renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, "initial_claims", "신규 실업수당")}
+        ${renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, "real_retail_sales_proxy", "Retail Sales - CPI")}
+        ${renderIndicatorHistoryDelta(latestSnapshot, previousSnapshot, "eps_beat_rate", "EPS Beat Rate")}
+      </div>
+    </article>
+  `;
+}
+
+function renderOverview(data, history) {
   const m = data.marketSummary || {};
   const t = data.timingSummary || {};
   const live = computeLiveAxisScore(data);
@@ -1059,6 +1244,7 @@ function renderOverview(data) {
   $("summaryGrid").innerHTML = `
     ${renderLiveAxisScoreCard(live)}
     ${renderScenarioActionPlan(data, live)}
+    ${renderHistoryOverview(data, history, live)}
     <article class="card">
       <h3>기존 시장 국면 메모</h3>
       <div class="metric-value">${escapeHtml(m.marketConditionLabel || "확인 필요")}</div>
@@ -1379,7 +1565,7 @@ function renderTodo(data) {
 
 function renderAll(data) {
   renderMeta(data);
-  renderOverview(data);
+  renderOverview(data, APP_HISTORY_DATA);
   renderAxes(data);
   renderTiming(data);
   renderMatrix(data);
@@ -1419,6 +1605,19 @@ async function init() {
 
     if (!data.schemaVersion || !Array.isArray(data.indicators)) {
       throw new Error("latest.json v1 스키마가 아닙니다. schemaVersion과 indicators를 확인하세요.");
+    }
+
+    try {
+      const historyResponse = await fetch(HISTORY_URL);
+      if (historyResponse.ok) {
+        const historyData = await historyResponse.json();
+        APP_HISTORY_DATA = historyData && Array.isArray(historyData.snapshots) ? historyData : null;
+      } else {
+        APP_HISTORY_DATA = null;
+      }
+    } catch (historyError) {
+      console.warn("history.json load failed", historyError);
+      APP_HISTORY_DATA = null;
     }
 
     APP_RAW_DATA = data;
