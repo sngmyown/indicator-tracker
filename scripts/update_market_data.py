@@ -25,6 +25,8 @@ STOOQ_DOLLAR_INDEX_URL = "https://stooq.com/q/d/l/?s=dx.f&i=d"
 YAHOO_DOLLAR_INDEX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?range=1mo&interval=1d"
 YAHOO_DOLLAR_INDEX_ALT_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EDXY?range=1mo&interval=1d"
 YAHOO_WTI_URL = "https://query1.finance.yahoo.com/v8/finance/chart/CL%3DF?range=1mo&interval=1d"
+STOOQ_COPPER_URL = "https://stooq.com/q/d/l/?s=hg.f&i=d"
+YAHOO_COPPER_URL = "https://query1.finance.yahoo.com/v8/finance/chart/HG%3DF?range=1mo&interval=1d"
 
 
 def fred_url(series_id):
@@ -259,6 +261,10 @@ def fetch_yahoo_dollar_index_alt():
 
 def fetch_yahoo_wti_oil():
     return fetch_yahoo_chart_close(YAHOO_WTI_URL, "CL=F", "Yahoo Finance WTI Futures")
+
+
+def fetch_yahoo_copper_price():
+    return fetch_yahoo_chart_close(YAHOO_COPPER_URL, "HG=F", "Yahoo Finance Copper Futures")
 
 
 def fetch_stooq_vix():
@@ -507,6 +513,31 @@ def wti_oil_signal(value, change_percent):
 
     if 60 <= value <= 85 and abs(change_percent) < 5.0:
         return "neutral", 0
+
+    return "neutral", 0
+
+
+def copper_price_signal(value, change_percent):
+    """구리 가격 해석 기준.
+
+    구리는 제조업·건설 수요와 경기 회복 기대를 반영하는 선행성 원자재입니다.
+    FRED PCOPPUSDM은 월간 USD/metric ton 계열이고, Yahoo/Stooq는 구리 선물 프록시이므로
+    자동 점수는 절대값보다 최근 변화율을 우선합니다.
+    """
+    # 급격한 하락은 제조업/건설 수요 둔화 신호로 봅니다.
+    if change_percent <= -3.0:
+        return "negative", -1
+
+    # 완만한 상승은 경기 회복 기대와 소재/산업재 상대강도에 우호적입니다.
+    if change_percent >= 3.0:
+        return "positive", 1
+
+    # 프록시가 달러/파운드 단위일 때의 보조 절대 레벨입니다.
+    if value < 100:
+        if value >= 4.5:
+            return "positive", 1
+        if value <= 3.5:
+            return "negative", -1
 
     return "neutral", 0
 
@@ -1059,6 +1090,20 @@ def fetch_wti_oil_with_fallback():
 
     return fetch_with_fallback("wti_oil", providers)
 
+
+def fetch_copper_price_with_fallback():
+    providers = [
+        ("FRED recent PCOPPUSDM", lambda: fetch_fred_series_recent("PCOPPUSDM", years_back=5)),
+        ("Yahoo Finance Copper HG=F proxy", fetch_yahoo_copper_price),
+        ("Stooq Copper Futures proxy", lambda: fetch_stooq_daily_close(
+            STOOQ_COPPER_URL,
+            "hg.f-proxy",
+            "Stooq Copper Futures Proxy",
+        )),
+    ]
+
+    return fetch_with_fallback("copper_price", providers)
+
 def update_initial_claims(data):
     now = datetime.now(KST)
     today = now.date().isoformat()
@@ -1419,10 +1464,80 @@ def update_wti_oil(data):
         }
 
 
+def update_copper_price(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+
+    item = find_indicator(data, "copper_price")
+
+    try:
+        result = fetch_copper_price_with_fallback()
+
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change_percent = percent_change(current_value, previous_value)
+        signal, score = copper_price_signal(current_value, change_percent)
+
+        is_proxy = bool(result.get("isProxy"))
+        status_note = "proxy-auto-updated" if is_proxy else "auto-updated"
+
+        if is_proxy:
+            interpretation = f"구리 가격 프록시 최신값은 {current_value:.4f}입니다. 데이터 출처는 {result['provider']}입니다. 이 값은 FRED PCOPPUSDM 실패 시 쓰는 구리 선물 기반 프록시입니다."
+            market_reaction = "구리 프록시 상승은 제조업·건설 수요와 경기 회복 기대에 우호적일 수 있습니다. 단, 프록시는 방향 확인용으로 제한적으로 사용합니다."
+            action = "구리 강세가 달러 약세·금리 안정과 함께 나타나면 산업재·소재·경기민감주 상대강도를 관찰합니다."
+        else:
+            interpretation = f"구리 가격 최신값은 {current_value:.2f}입니다. 데이터 출처는 {result['provider']}입니다. FRED PCOPPUSDM은 월간 구리 가격 계열이므로 방향성과 추세를 중심으로 봅니다."
+            market_reaction = "구리 상승은 제조업·건설 수요와 경기 회복 기대를 반영할 수 있습니다. 반대로 구리 하락은 경기 둔화와 산업 수요 약화를 경고할 수 있습니다."
+            action = "구리 강세가 WTI 급등이 아닌 수요 회복과 함께 나타나는지 확인하고, 산업재·소재 섹터 자금 흐름을 함께 봅니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note=status_note,
+        )
+
+        item["unit"] = "USD" if not is_proxy else "$/lb proxy"
+
+        print("[update] copper_price auto-updated", flush=True)
+        return {
+            "id": "copper_price",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "change": info["change"],
+            "changePercent": info["changePercent"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": status_note,
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] copper_price source-error", flush=True)
+        return {
+            "id": "copper_price",
+            "signal": "source-error",
+            "score": 0,
+            "value": "source-error",
+            "change": "source-error",
+            "changePercent": "source-error",
+            "date": today,
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
 def update_dollar_commodities(data):
     updates = [
         update_dollar_index(data),
         update_wti_oil(data),
+        update_copper_price(data),
     ]
     update_dollar_commodities_summary(data, updates)
 
@@ -1437,6 +1552,7 @@ def update_dollar_commodities_summary(data, updates):
     by_id = {item["id"]: item for item in updates}
     dollar = by_id.get("dollar_index_proxy", {})
     wti = by_id.get("wti_oil", {})
+    copper = by_id.get("copper_price", {})
 
     score = sum(item.get("score", 0) for item in updates)
     all_source_error = all(item.get("signal") == "source-error" for item in updates)
@@ -1448,27 +1564,41 @@ def update_dollar_commodities_summary(data, updates):
 
     dollar_signal_value = dollar.get("signal", "source-error")
     wti_signal_value = wti.get("signal", "source-error")
+    copper_signal_value = copper.get("signal", "source-error")
+
+    leading_scores = [
+        item.get("score", 0)
+        for item in (dollar, copper)
+        if item.get("signal") != "source-error"
+    ]
+    if leading_scores:
+        leading_status = axis_status_from_score(sum(leading_scores))
+    else:
+        leading_status = "source-error"
 
     dollar_value_text = format_price_value(dollar.get("value"))
     wti_value_text = format_price_value(wti.get("value"), "달러")
+    copper_value = copper.get("value")
+    copper_suffix = "" if not isinstance(copper_value, (int, float)) else ("달러" if copper_value > 100 else "달러/파운드")
+    copper_value_text = format_price_value(copper_value, copper_suffix)
 
     data.setdefault("axisSummary", {})
     if "dollar-commodities" in data["axisSummary"]:
         data["axisSummary"]["dollar-commodities"].update({
             "status": status,
             "score": score,
-            "leadingStatus": dollar_signal_value,
+            "leadingStatus": leading_status,
             "coincidentStatus": wti_signal_value,
             "laggingStatus": "not-applicable",
-            "summary": f"달러 지수는 {dollar_value_text}, WTI는 {wti_value_text}입니다.",
-            "interpretation": "달러와 원유는 글로벌 유동성, 인플레이션 압력, 경기 수요를 함께 보여주는 축입니다. 달러 강세와 유가 급등이 동시에 나타나면 위험자산에는 부담이 커질 수 있습니다.",
-            "action": "달러 강세·유가 급등·금리 상승이 동시에 나타나면 추격 매수를 줄이고, 섹터별 마진 압박을 확인합니다.",
+            "summary": f"달러 지수는 {dollar_value_text}, WTI는 {wti_value_text}, 구리는 {copper_value_text}입니다.",
+            "interpretation": "달러·원유·구리는 글로벌 유동성, 인플레이션 압력, 제조업·건설 수요를 함께 보여주는 축입니다. 달러 강세와 유가 급등이 동시에 나타나면 위험자산에는 부담이 커지고, 구리 강세가 동반되면 경기 회복 기대를 함께 확인할 수 있습니다.",
+            "action": "달러 강세·유가 급등·금리 상승이 동시에 나타나면 추격 매수를 줄입니다. 반대로 달러 안정, 유가 안정, 구리 강세가 함께 나타나면 산업재·소재·경기민감 섹터의 상대강도를 관찰합니다.",
         })
 
     data.setdefault("matrix", {})
     if "dollar-commodities" in data["matrix"]:
         data["matrix"]["dollar-commodities"].update({
-            "leading": dollar_signal_value,
+            "leading": leading_status,
             "coincident": wti_signal_value,
             "lagging": "not-applicable",
         })
@@ -1565,16 +1695,17 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-stable-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI 자동 업데이트가 실행되었습니다.",
+            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
             "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
             "실업률은 FRED UNRATE를 먼저 시도하고, 실패 시 BLS Public Data API LNS14000000을 사용합니다.",
             "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
-            "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Stooq WTI Futures 프록시를 사용합니다.",
+            "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq WTI Futures 프록시를 사용합니다.",
+            "구리 가격은 FRED PCOPPUSDM을 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq Copper Futures 프록시를 사용합니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
@@ -1595,7 +1726,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment + dollar/WTI safe auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper safe auto update", flush=True)
 
     data = load_data()
 
@@ -1613,7 +1744,7 @@ def main():
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment + dollar/WTI safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
