@@ -47,6 +47,7 @@ BLS_AVG_HOURLY_EARNINGS_SERIES_ID = "CES0500000003"
 BLS_PPI_ALL_COMMODITIES_SERIES_ID = "WPU00000000"
 BLS_PPI_FINAL_DEMAND_SERIES_ID = "WPUFD4"
 FED_H15_FED_FUNDS_WEEKLY_URL = "https://www.federalreserve.gov/datadownload/Output.aspx?rel=H15&series=8e83f7f17c5cea4d190d85ae6737639f&lastObs=52&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package"
+FED_CREDIT_CARD_DELINQUENCY_URL = "https://www.federalreserve.gov/releases/chargeoff/delallsa.htm"
 
 FACTSET_EARNINGS_INSIGHT_URL = "https://www.factset.com/earningsinsight"
 FACTSET_EARNINGS_TOPIC_URL = "https://insight.factset.com/topic/earnings"
@@ -2349,9 +2350,94 @@ def fetch_ppi_yoy_with_fallback():
     return fetch_with_fallback("ppi_yoy", providers)
 
 
+def quarter_to_fred_like_date(quarter_label):
+    """Convert Federal Reserve quarter label like 2026:1 to FRED-style quarter start date."""
+    match = re.match(r"^(\d{4})[:Qq]([1-4])$", str(quarter_label).strip())
+    if not match:
+        return datetime.now(KST).date().isoformat()
+    year = int(match.group(1))
+    quarter = int(match.group(2))
+    month = {1: 1, 2: 4, 3: 7, 4: 10}[quarter]
+    return f"{year:04d}-{month:02d}-01"
+
+
+def fetch_fred_plain_data_series(series_id, years_back=12):
+    """Fetch FRED's plain text data endpoint as a fallback to graph CSV."""
+    url = f"https://fred.stlouisfed.org/data/{series_id}"
+    text = fetch_text(url, retries=2, timeout=12)
+    rows = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        date = parts[0]
+        value = parts[-1]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+            continue
+        if value in (".", "", "n.a.", "NA"):
+            continue
+        try:
+            numeric = float(value)
+        except ValueError:
+            continue
+        rows.append({"date": date, "value": numeric})
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "FRED plain data endpoint",
+        "series": series_id,
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
+def fetch_federal_reserve_credit_card_delinquency():
+    """Fetch credit-card delinquency rate from the Federal Reserve release page.
+
+    The delallsa.htm table is 'Delinquency Rates / All Banks, SA'.
+    In the row structure, the 6th numeric field is Consumer loans - Credit cards.
+    It matches FRED DRCCLACBS (e.g., 2026:1 -> 2.92).
+    """
+    raw = fetch_text(FED_CREDIT_CARD_DELINQUENCY_URL, retries=2, timeout=12)
+    text = clean_html_text(raw)
+    rows = []
+
+    for match in re.finditer(r"(20\d{2}|19\d{2})[:Qq]([1-4])\s+((?:-?\d+(?:\.\d+)?|n\.a\.)[\s\u00a0]+(?:-?\d+(?:\.\d+)?|n\.a\.)[\s\u00a0]+(?:-?\d+(?:\.\d+)?|n\.a\.)[\s\u00a0]+(?:-?\d+(?:\.\d+)?|n\.a\.)[\s\u00a0]+(?:-?\d+(?:\.\d+)?|n\.a\.)[\s\u00a0]+(?:-?\d+(?:\.\d+)?|n\.a\.))", text):
+        year = match.group(1)
+        quarter = match.group(2)
+        numeric_values = re.findall(r"-?\d+(?:\.\d+)?|n\.a\.", match.group(3), flags=re.IGNORECASE)
+        if len(numeric_values) < 6:
+            continue
+        credit_card_value = numeric_values[5]
+        if credit_card_value.lower() == "n.a.":
+            continue
+        try:
+            value = round(float(credit_card_value), 4)
+        except ValueError:
+            continue
+        rows.append({
+            "date": quarter_to_fred_like_date(f"{year}:{quarter}"),
+            "value": value,
+        })
+
+    latest, previous = latest_two_from_rows(rows)
+    return {
+        "provider": "Federal Reserve Charge-Off and Delinquency Rates",
+        "series": "DRCCLACBS-FRB-delallsa-credit-card-delinquency",
+        "url": FED_CREDIT_CARD_DELINQUENCY_URL,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
 def fetch_credit_card_delinquency_with_fallback():
     providers = [
-        ("FRED DRCCLACBS quarterly credit-card delinquency", lambda: fetch_fred_series_recent("DRCCLACBS", years_back=12)),
+        ("FRED DRCCLACBS graph CSV", lambda: fetch_fred_series_recent("DRCCLACBS", years_back=12)),
+        ("FRED DRCCLACBS plain data endpoint", lambda: fetch_fred_plain_data_series("DRCCLACBS", years_back=12)),
+        ("Federal Reserve delinquency rates release table", fetch_federal_reserve_credit_card_delinquency),
     ]
     return fetch_with_fallback("credit_card_delinquency", providers)
 
@@ -3691,22 +3777,57 @@ def extract_factset_candidate_urls(raw_html):
     return urls[:8]
 
 
+def first_percent_in_relevant_sentence(text, required_keywords, reject_keywords=None):
+    """Return the first percentage in a sentence/window containing all required keywords."""
+    reject_keywords = reject_keywords or []
+    normalized = re.sub(r"\s+", " ", text)
+
+    # Sentence-level parsing first.
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    for sentence in sentences:
+        lower = sentence.lower()
+        if all(keyword.lower() in lower for keyword in required_keywords) and not any(keyword.lower() in lower for keyword in reject_keywords):
+            for candidate in re.findall(r"([0-9]{1,3}(?:\.\d+)?)\s*%", sentence):
+                value = float(candidate)
+                if 0 <= value <= 100:
+                    return value
+
+    # If punctuation was stripped by the site, use a window around the key phrase.
+    primary_keyword = required_keywords[-1]
+    for match in re.finditer(re.escape(primary_keyword), normalized, flags=re.IGNORECASE):
+        window = normalized[max(0, match.start() - 240): match.end() + 240]
+        lower = window.lower()
+        if all(keyword.lower() in lower for keyword in required_keywords) and not any(keyword.lower() in lower for keyword in reject_keywords):
+            candidates = [float(x) for x in re.findall(r"([0-9]{1,3}(?:\.\d+)?)\s*%", window)]
+            candidates = [value for value in candidates if 0 <= value <= 100]
+            if candidates:
+                return candidates[0]
+
+    return None
+
+
 def parse_factset_beat_rates(raw_text):
     text = clean_html_text(raw_text)
 
-    eps_patterns = [
-        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
-        r"([0-9]{1,3})\s*percent\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
-        r"actual\s+EPS\s+above\s+estimates[^0-9]{0,80}([0-9]{1,3})%",
-    ]
-    rev_patterns = [
-        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
-        r"([0-9]{1,3})\s*percent\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
-        r"actual\s+revenues?\s+above\s+estimates[^0-9]{0,80}([0-9]{1,3})%",
-    ]
-
     eps = None
     revenue = None
+
+    eps_patterns = [
+        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
+        r"([0-9]{1,3})%\s+of\s+S&P\s+500\s+companies\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
+        r"([0-9]{1,3})\s*percent\s+(?:of\s+S&P\s+500\s+companies\s+)?have\s+reported\s+actual\s+EPS\s+above\s+estimates",
+        r"actual\s+EPS\s+above\s+estimates[^0-9]{0,160}([0-9]{1,3})%",
+        r"([0-9]{1,3})%[^.]{0,220}actual\s+EPS\s+above\s+estimates",
+    ]
+    rev_patterns = [
+        r"In\s+terms\s+of\s+revenues?,?\s+([0-9]{1,3})%\s+of\s+S&P\s+500\s+companies\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"([0-9]{1,3})%\s+of\s+S&P\s+500\s+companies\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"([0-9]{1,3})\s*percent\s+(?:of\s+S&P\s+500\s+companies\s+)?have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"actual\s+revenues?\s+above\s+estimates[^0-9]{0,160}([0-9]{1,3})%",
+        r"([0-9]{1,3})%[^.]{0,260}actual\s+revenues?\s+above\s+estimates",
+    ]
+
     for pattern in eps_patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
@@ -3718,11 +3839,17 @@ def parse_factset_beat_rates(raw_text):
             revenue = extract_number(match.group(1))
             break
 
+    # Robust fallback for FactSet's common wording:
+    # "In terms of revenues, 81% of S&P 500 companies have reported actual revenues above estimates..."
+    if eps is None:
+        eps = first_percent_in_relevant_sentence(text, ["actual EPS", "above estimates"])
+    if revenue is None:
+        revenue = first_percent_in_relevant_sentence(text, ["revenues", "above estimates"])
+
     if eps is None and revenue is None:
         raise ValueError("FactSet EPS/Revenue beat rate 숫자를 파싱하지 못했습니다.")
 
     return {"eps": eps, "revenue": revenue}
-
 
 def fetch_factset_beat_rates():
     global FACTSET_BEAT_RATE_CACHE
@@ -3965,7 +4092,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-manual-auto-bridge-v1",
+        "automationStatus": "full-auto-broad-indicators-credit-revenue-fix-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -4021,7 +4148,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-manual-auto-bridge-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-credit-revenue-fix-v1", flush=True)
 
 
 if __name__ == "__main__":
