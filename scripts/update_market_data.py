@@ -1,4 +1,5 @@
 import csv
+import html
 import json
 import re
 import time
@@ -46,6 +47,13 @@ BLS_AVG_HOURLY_EARNINGS_SERIES_ID = "CES0500000003"
 BLS_PPI_ALL_COMMODITIES_SERIES_ID = "WPU00000000"
 BLS_PPI_FINAL_DEMAND_SERIES_ID = "WPUFD4"
 FED_H15_FED_FUNDS_WEEKLY_URL = "https://www.federalreserve.gov/datadownload/Output.aspx?rel=H15&series=8e83f7f17c5cea4d190d85ae6737639f&lastObs=52&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package"
+
+FACTSET_EARNINGS_INSIGHT_URL = "https://www.factset.com/earningsinsight"
+FACTSET_EARNINGS_TOPIC_URL = "https://insight.factset.com/topic/earnings"
+ISM_INVESTING_URL = "https://www.investing.com/economic-calendar/ism-manufacturing-pmi-173"
+ISM_TRADING_ECONOMICS_URL = "https://tradingeconomics.com/united-states/business-confidence"
+ISM_REPORTS_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-pmi-reports/"
+
 
 
 YAHOO_SPY_URL = "https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=1mo&interval=1d"
@@ -3561,19 +3569,374 @@ def update_all_remaining_auto_indicators(data):
     update_extra_dollar_commodities(data)
 
 
+
+# Additional auto-updatable manual indicators
+# - 신용카드 연체율은 기존 FRED DRCCLACBS 자동화 함수를 사용합니다.
+# - ISM Manufacturing PMI는 공식/공개 페이지에서 headline 숫자를 파싱합니다.
+# - FactSet EPS/Revenue beat rate는 FactSet 공개 Earnings Insight/Update 페이지에서 숫자만 추출합니다.
+
+FACTSET_BEAT_RATE_CACHE = None
+
+
+def clean_html_text(raw_text):
+    text = re.sub(r"<script[\s\S]*?</script>", " ", raw_text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def static_result(provider, series, url, current, previous=None, date=None, is_proxy=True):
+    if previous is None:
+        previous = current
+    if date is None:
+        date = datetime.now(KST).date().isoformat()
+    return {
+        "provider": provider,
+        "series": series,
+        "url": url,
+        "latest": {"date": date, "value": round(float(current), 4)},
+        "previous": {"date": date, "value": round(float(previous), 4)},
+        "isProxy": is_proxy,
+    }
+
+
+def extract_number(value):
+    if value is None:
+        raise ValueError("숫자 값이 없습니다.")
+    return float(str(value).replace(",", "").strip())
+
+
+def ism_pmi_signal(value, change):
+    # 50은 제조업 확장/수축 기준선입니다.
+    # 50~55는 골디락스에 가까운 완만한 확장, 55 이상은 강한 확장입니다.
+    if value >= 50:
+        return "positive", 1
+    if value < 45:
+        return "negative", -1
+    return "warning", 0
+
+
+def beat_rate_signal(value, threshold=70):
+    if value >= threshold:
+        return "positive", 1
+    if value >= threshold - 10:
+        return "neutral", 0
+    return "negative", -1
+
+
+def parse_ism_from_text(raw_text):
+    text = clean_html_text(raw_text)
+
+    patterns = [
+        # Investing.com economic calendar style: Actual 54.0 Forecast 53.3 Previous 52.7
+        r"Actual\s+([0-9]+(?:\.[0-9]+)?)\s+Forecast\s+[0-9]+(?:\.[0-9]+)?\s+Previous\s+([0-9]+(?:\.[0-9]+)?)",
+        # TradingEconomics/news style: PMI increased to 52.7 ... from 52.4
+        r"ISM\s+Manufacturing\s+PMI[^.]{0,400}?(?:increased|rose|slipped|fell|declined|decreased|was|came\s+in|registered|stood\s+at)\s+(?:to|at)?\s*([0-9]+(?:\.[0-9]+)?)[^.]{0,200}?\s+from\s+([0-9]+(?:\.[0-9]+)?)",
+        # ISM press-release style: Manufacturing PMI registered 54 percent ... previous 52.7
+        r"Manufacturing\s+PMI[^.]{0,300}?(?:registered|was|came\s+in\s+at|stood\s+at)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:percent|%)?[^.]{0,300}?(?:previous|prior|last\s+month)[^0-9]{0,80}([0-9]+(?:\.[0-9]+)?)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return extract_number(match.group(1)), extract_number(match.group(2))
+
+    # If a page exposes JSON-like keys.
+    json_like = re.search(r'"actual"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?[\s\S]{0,300}?"previous"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?', raw_text, flags=re.IGNORECASE)
+    if json_like:
+        return extract_number(json_like.group(1)), extract_number(json_like.group(2))
+
+    raise ValueError("ISM Manufacturing PMI headline 숫자를 파싱하지 못했습니다.")
+
+
+def fetch_ism_manufacturing_pmi_with_fallback():
+    providers = [
+        ("Investing.com ISM Manufacturing PMI calendar", ISM_INVESTING_URL),
+        ("TradingEconomics ISM Manufacturing PMI page", ISM_TRADING_ECONOMICS_URL),
+        ("ISM PMI reports page", ISM_REPORTS_URL),
+    ]
+
+    last_error = None
+    for provider, url in providers:
+        try:
+            text = fetch_text(url, retries=1, timeout=10)
+            current, previous = parse_ism_from_text(text)
+            return static_result(provider, "ISM-Manufacturing-PMI-Headline", url, current, previous, is_proxy=True)
+        except Exception as error:
+            last_error = error
+            print(f"[ism-failed] {provider}: {error}", flush=True)
+
+    raise RuntimeError(f"ISM Manufacturing PMI 자동 수집 실패: {last_error}")
+
+
+def extract_factset_candidate_urls(raw_html):
+    urls = []
+    for href in re.findall(r'href=["\']([^"\']+)["\']', raw_html, flags=re.IGNORECASE):
+        if "earnings-season-update" not in href.lower() and "earnings-insight" not in href.lower():
+            continue
+        if href.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".svg")):
+            continue
+        if href.startswith("//"):
+            url = "https:" + href
+        elif href.startswith("/"):
+            url = urllib.parse.urljoin("https://insight.factset.com", href)
+        elif href.startswith("http"):
+            url = href
+        else:
+            url = urllib.parse.urljoin("https://insight.factset.com", href)
+        if url not in urls:
+            urls.append(url)
+    return urls[:8]
+
+
+def parse_factset_beat_rates(raw_text):
+    text = clean_html_text(raw_text)
+
+    eps_patterns = [
+        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
+        r"([0-9]{1,3})\s*percent\s+have\s+reported\s+actual\s+EPS\s+above\s+estimates",
+        r"actual\s+EPS\s+above\s+estimates[^0-9]{0,80}([0-9]{1,3})%",
+    ]
+    rev_patterns = [
+        r"([0-9]{1,3})%\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"([0-9]{1,3})\s*percent\s+have\s+reported\s+actual\s+revenues?\s+above\s+estimates",
+        r"actual\s+revenues?\s+above\s+estimates[^0-9]{0,80}([0-9]{1,3})%",
+    ]
+
+    eps = None
+    revenue = None
+    for pattern in eps_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            eps = extract_number(match.group(1))
+            break
+    for pattern in rev_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            revenue = extract_number(match.group(1))
+            break
+
+    if eps is None and revenue is None:
+        raise ValueError("FactSet EPS/Revenue beat rate 숫자를 파싱하지 못했습니다.")
+
+    return {"eps": eps, "revenue": revenue}
+
+
+def fetch_factset_beat_rates():
+    global FACTSET_BEAT_RATE_CACHE
+    if FACTSET_BEAT_RATE_CACHE is not None:
+        return FACTSET_BEAT_RATE_CACHE
+
+    errors = []
+    candidate_urls = [FACTSET_EARNINGS_INSIGHT_URL, FACTSET_EARNINGS_TOPIC_URL]
+
+    # First fetch index/topic pages and collect recent article URLs.
+    for url in list(candidate_urls):
+        try:
+            raw = fetch_text(url, retries=1, timeout=12)
+            for candidate in extract_factset_candidate_urls(raw):
+                if candidate not in candidate_urls:
+                    candidate_urls.append(candidate)
+            rates = parse_factset_beat_rates(raw)
+            if rates.get("eps") is not None or rates.get("revenue") is not None:
+                FACTSET_BEAT_RATE_CACHE = {"rates": rates, "url": url, "provider": "FactSet Earnings Insight"}
+                return FACTSET_BEAT_RATE_CACHE
+        except Exception as error:
+            errors.append(f"{url}: {error}")
+
+    # Then fetch recent candidate articles.
+    for url in candidate_urls[2:]:
+        try:
+            raw = fetch_text(url, retries=1, timeout=12)
+            rates = parse_factset_beat_rates(raw)
+            if rates.get("eps") is not None or rates.get("revenue") is not None:
+                FACTSET_BEAT_RATE_CACHE = {"rates": rates, "url": url, "provider": "FactSet Earnings Insight"}
+                return FACTSET_BEAT_RATE_CACHE
+        except Exception as error:
+            errors.append(f"{url}: {error}")
+
+    raise RuntimeError("FactSet beat rate 자동 수집 실패: " + " | ".join(errors[-5:]))
+
+
+def fetch_factset_single_rate(kind):
+    data = fetch_factset_beat_rates()
+    value = data["rates"].get(kind)
+    if value is None:
+        raise ValueError(f"FactSet {kind} beat rate를 찾지 못했습니다.")
+    label = "EPS Beat Rate" if kind == "eps" else "Revenue Beat Rate"
+    return static_result(data["provider"], f"FactSet-S&P500-{label}", data["url"], value, value, is_proxy=True)
+
+
+def update_ism_manufacturing_pmi(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "ism_manufacturing_pmi")
+    try:
+        result = fetch_ism_manufacturing_pmi_with_fallback()
+        current = result["latest"]["value"]
+        previous = result["previous"]["value"]
+        signal, score = ism_pmi_signal(current, round(current - previous, 4))
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"ISM Manufacturing PMI Headline은 {current:.1f}입니다. 50 이상은 제조업 확장, 50 미만은 수축으로 봅니다.",
+            "PMI가 50 이상이면 제조업 경기와 경기민감 섹터에 우호적이지만, 과도한 강세는 물가 압력과 함께 해석해야 합니다.",
+            "50 이상 유지 시 경기민감·산업재·소재 흐름을 관찰하고, 50 하회가 지속되면 방어적 해석으로 전환합니다.",
+            status_note="proxy-auto-updated",
+        ) | {"id": "ism_manufacturing_pmi", "signal": signal, "score": score, "statusNote": "proxy-auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "ism_manufacturing_pmi", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_eps_beat_rate(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "eps_beat_rate")
+    try:
+        result = fetch_factset_single_rate("eps")
+        current = result["latest"]["value"]
+        signal, score = beat_rate_signal(current, threshold=70)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"S&P 500 EPS Beat Rate는 {current:.0f}%입니다. 70% 이상은 실적 시즌의 질이 양호한 구간으로 봅니다.",
+            "EPS beat rate가 높으면 이익 기대가 유지되며 멀티플 부담을 일부 흡수할 수 있습니다.",
+            "70% 이상 유지 시 실적 축을 긍정으로 보고, 60% 이하로 내려가면 이익 기대 둔화를 경계합니다.",
+            status_note="proxy-auto-updated",
+        ) | {"id": "eps_beat_rate", "signal": signal, "score": score, "statusNote": "proxy-auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "eps_beat_rate", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_revenue_beat_rate(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "revenue_beat_rate")
+    try:
+        result = fetch_factset_single_rate("revenue")
+        current = result["latest"]["value"]
+        signal, score = beat_rate_signal(current, threshold=65)
+        return update_generic_indicator(
+            item,
+            result,
+            signal,
+            score,
+            f"S&P 500 Revenue Beat Rate는 {current:.0f}%입니다. 65% 이상은 매출 수요가 양호한 구간으로 봅니다.",
+            "Revenue beat rate가 높으면 비용 절감이 아니라 실제 수요가 실적을 받치는지 확인하는 데 유용합니다.",
+            "Revenue beat가 약해지면 EPS beat가 높아도 마진/비용절감 중심 실적인지 점검합니다.",
+            status_note="proxy-auto-updated",
+        ) | {"id": "revenue_beat_rate", "signal": signal, "score": score, "statusNote": "proxy-auto-updated"}
+    except Exception as error:
+        mark_source_error(item, today, str(error))
+        return {"id": "revenue_beat_rate", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+
+
+def update_earnings_summary(data):
+    ids = ["eps_beat_rate", "revenue_beat_rate", "m7_guidance_change", "consensus_revision"]
+    score = 0
+    for indicator_id in ids:
+        try:
+            item = find_indicator(data, indicator_id)
+        except Exception:
+            continue
+        if item.get("signal") in ("source-error", "manual-required"):
+            continue
+        if is_number(item.get("score")):
+            score += item.get("score")
+
+    eps = find_indicator(data, "eps_beat_rate")
+    rev = find_indicator(data, "revenue_beat_rate")
+    try:
+        m7 = find_indicator(data, "m7_guidance_change")
+        consensus = find_indicator(data, "consensus_revision")
+    except Exception:
+        m7 = {"signal": "manual-required"}
+        consensus = {"signal": "manual-required"}
+
+    status = axis_status_from_score(score)
+    if "earnings" in data.get("axisSummary", {}):
+        data["axisSummary"]["earnings"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": axis_status_from_score(sum(x.get("score", 0) if is_number(x.get("score")) else 0 for x in [m7, consensus] if x.get("signal") not in ("source-error", "manual-required"))),
+            "coincidentStatus": rev.get("signal", "neutral"),
+            "laggingStatus": axis_status_from_score(sum(x.get("score", 0) if is_number(x.get("score")) else 0 for x in [eps, rev] if x.get("signal") not in ("source-error", "manual-required"))),
+            "summary": f"EPS Beat {eps.get('currentValue')}, Revenue Beat {rev.get('currentValue')}입니다. M7 가이던스와 컨센서스 리비전은 수동 입력을 병행합니다.",
+            "interpretation": "실적 축은 EPS beat와 revenue beat를 함께 봅니다. EPS만 강하고 매출이 약하면 비용절감형 실적일 수 있어 질을 낮게 봅니다.",
+            "action": "EPS와 매출 beat가 모두 양호하면 실적 축을 긍정으로 보고, 가이던스와 컨센서스 리비전 수동 입력으로 선행성을 보강합니다.",
+        })
+    if "earnings" in data.get("matrix", {}):
+        data["matrix"]["earnings"].update({
+            "leading": data.get("axisSummary", {}).get("earnings", {}).get("leadingStatus", "manual-required"),
+            "coincident": rev.get("signal", "neutral"),
+            "lagging": data.get("axisSummary", {}).get("earnings", {}).get("laggingStatus", "neutral"),
+        })
+
+
+def update_employment_summary_with_ism(data):
+    ids = ["initial_claims", "unemployment_rate", "nonfarm_payrolls", "average_hourly_earnings", "ism_manufacturing_pmi"]
+    score = 0
+    details = []
+    for indicator_id in ids:
+        try:
+            item = find_indicator(data, indicator_id)
+        except Exception:
+            continue
+        if item.get("signal") not in ("source-error", "manual-required") and is_number(item.get("score")):
+            score += item.get("score")
+        details.append(f"{indicator_id}: {item.get('currentValue')}")
+    status = axis_status_from_score(score)
+    if "employment" in data.get("axisSummary", {}):
+        data["axisSummary"]["employment"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": axis_status_from_score(sum(find_indicator(data, i).get("score", 0) if is_number(find_indicator(data, i).get("score")) else 0 for i in ["initial_claims", "ism_manufacturing_pmi"] if find_indicator(data, i).get("signal") not in ("source-error", "manual-required"))),
+            "coincidentStatus": axis_status_from_score(sum(find_indicator(data, i).get("score", 0) if is_number(find_indicator(data, i).get("score")) else 0 for i in ["nonfarm_payrolls", "average_hourly_earnings"] if find_indicator(data, i).get("signal") not in ("source-error", "manual-required"))),
+            "laggingStatus": find_indicator(data, "unemployment_rate").get("signal", "neutral"),
+            "summary": " / ".join(details),
+            "interpretation": "고용·경기 사이클 축은 신규 실업수당, 실업률, NFP, 임금, ISM 제조업 PMI를 함께 봅니다.",
+            "action": "신규 실업수당과 ISM이 동시에 악화되면 경기 둔화 시나리오를 높이고, NFP와 임금은 동행 확인 신호로 봅니다.",
+        })
+    if "employment" in data.get("matrix", {}):
+        data["matrix"]["employment"].update({
+            "leading": data["axisSummary"]["employment"].get("leadingStatus", "neutral"),
+            "coincident": data["axisSummary"]["employment"].get("coincidentStatus", "neutral"),
+            "lagging": find_indicator(data, "unemployment_rate").get("signal", "neutral"),
+        })
+
+
+def update_newly_automated_indicators(data):
+    print("[new-auto] update credit card delinquency", flush=True)
+    # Credit-card delinquency update already exists; run it again so it is no longer left as manual-required.
+    update_credit_card_delinquency(data)
+
+    print("[new-auto] update ISM Manufacturing PMI", flush=True)
+    update_ism_manufacturing_pmi(data)
+    update_employment_summary_with_ism(data)
+
+    print("[new-auto] update FactSet EPS / Revenue beat rates", flush=True)
+    update_eps_beat_rate(data)
+    update_revenue_beat_rate(data)
+    update_earnings_summary(data)
+
+
 def update_unautomated_manual_notes(data):
     """Mark structurally manual indicators clearly.
 
-    실적 beat rate, M7 가이던스, 컨센서스 리비전, ISM PMI, pricing power 멘트,
-    VIX 선물 구조, Fear & Greed Index는 안정적인 무료 JSON 소스가 없거나 해석형 데이터입니다.
+    M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 안정적인 무료 JSON 소스가 없거나 해석형 데이터입니다.
     이들은 현재 자동화 대상이 아니라 수동 확인 대상으로 명확히 남깁니다.
     """
     manual_ids = [
-        "eps_beat_rate",
-        "revenue_beat_rate",
         "m7_guidance_change",
         "consensus_revision",
-        "ism_manufacturing_pmi",
         "pricing_power_mentions",
         "fear_greed_index",
     ]
@@ -3602,7 +3965,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-vix-futures-vxv-fallback-v1",
+        "automationStatus": "full-auto-broad-indicators-manual-auto-bridge-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -3613,7 +3976,7 @@ def update_meta(data):
             "추가 소비 지표: 신용카드 연체율.",
             "마진 축: PPI YoY, 임금 비용 YoY, CPI-PPI 가격전가 프록시.",
             "추가 원자재 지표: 금 가격 프록시.",
-            "실적 beat rate, M7 가이던스, 컨센서스 리비전, ISM PMI, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다. VIX 선물 구조는 Yahoo/Cboe 프록시로 자동화했습니다.",
+            "EPS/Revenue Beat Rate, ISM Manufacturing PMI, 신용카드 연체율은 자동화 대상으로 전환했습니다. M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "VIX 선물 구조는 ^VW1VX/^VW2VX 또는 ^VFTW1/^VFTW2로 계산하며, (VX2 - VX1) / VX1 × 100이 양수면 콘탱고, 음수면 백워데이션으로 표시합니다.",
         ],
@@ -3649,6 +4012,7 @@ def main():
     update_consumption(data)
 
     update_all_remaining_auto_indicators(data)
+    update_newly_automated_indicators(data)
     update_unautomated_manual_notes(data)
     update_meta(data)
 
@@ -3657,7 +4021,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-vix-futures-vxv-fallback-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-manual-auto-bridge-v1", flush=True)
 
 
 if __name__ == "__main__":
