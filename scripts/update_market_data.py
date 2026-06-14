@@ -1200,7 +1200,7 @@ def update_unemployment_rate(data):
             interpretation,
             market_reaction,
             action,
-            status_note=status_note,
+            status_note="auto-updated",
         )
 
         print("[update] unemployment_rate auto-updated", flush=True)
@@ -1646,35 +1646,65 @@ def normalize_html_text(text):
     return text.strip()
 
 
+def signed_percent(direction_word, numeric_text):
+    value = float(numeric_text)
+    if str(direction_word).lower() == "down":
+        value = -abs(value)
+    return round(value, 4)
+
+
 def fetch_census_retail_sales_yoy_proxy():
     """Fallback retail-sales YoY from the Census retail sales release page.
 
-    이 fallback은 FRED RSXFS가 실패할 때 쓰는 프록시입니다. Census release page의
-    문장형 발표에서 전년 대비 증가율을 추출하므로, FRED 월간 시계열보다 정교한
-    previousValue를 제공하지 못합니다. 따라서 previousValue는 currentValue와 동일하게
-    두고, statusNote는 proxy-auto-updated로 처리합니다.
+    주의: Census 문장에는 보통 MoM과 YoY가 같은 문장에 함께 있습니다.
+    예: "up 0.5 percent from March 2026, and up 5.2 percent from last year".
+    이전 버전은 이 문장에서 첫 번째 숫자 0.5(MoM)를 YoY로 잘못 잡을 수 있었습니다.
+    이 버전은 "from last year" 바로 앞의 증가율만 추출합니다.
     """
     text = fetch_text(CENSUS_RETAIL_SALES_PAGE_URL, retries=2, timeout=12)
     normalized = normalize_html_text(text)
 
-    patterns = [
-        # Retail trade sales were ... up 5.2 percent ... from last year.
-        r"Retail trade sales were[\s\S]{0,300}?up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,180}?from last year",
-        # retail and food services sales ... and up 4.9 percent ... from April 2025.
-        r"retail and food services sales[\s\S]{0,400}?and up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,180}?from\s+[A-Z][a-z]+\s+\d{4}",
-        # fallback: any nearby 'up X percent from last year'
-        r"up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,120}?from last year",
-    ]
+    # 가장 안전한 패턴: "up/down X percent (...) from last year"에 직접 붙은 숫자만 사용합니다.
+    direct_last_year_matches = list(re.finditer(
+        r"\b(up|down)\s+([-+]?\d+(?:\.\d+)?)\s+percent(?:\s*\([^)]*\))?\s+from last year",
+        normalized,
+        flags=re.IGNORECASE,
+    ))
 
     yoy_value = None
-    for pattern in patterns:
-        match = re.search(pattern, normalized, flags=re.IGNORECASE)
-        if match:
-            yoy_value = round(float(match.group(1)), 4)
-            break
+    if direct_last_year_matches:
+        # Census 문서에서 여러 문장이 잡힐 수 있으므로 Retail trade sales 문장에 가까운 값을 우선합니다.
+        preferred = None
+        for match in direct_last_year_matches:
+            window_start = max(0, match.start() - 260)
+            window = normalized[window_start:match.start()].lower()
+            if "retail trade sales" in window:
+                preferred = match
+                break
+        selected = preferred or direct_last_year_matches[0]
+        yoy_value = signed_percent(selected.group(1), selected.group(2))
 
     if yoy_value is None:
-        raise ValueError("Census retail sales release page에서 YoY 값을 찾지 못했습니다.")
+        # 보조 패턴: "from <same month prior year>" 형태.
+        # MoM의 "from March 2026" 같은 문장을 피하기 위해, 같은 문장 안의 마지막 증가율을 사용합니다.
+        sentence_match = re.search(
+            r"Retail trade sales were[^.]+\.",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if sentence_match:
+            sentence = sentence_match.group(0)
+            candidates = list(re.finditer(
+                r"\b(up|down)\s+([-+]?\d+(?:\.\d+)?)\s+percent(?:\s*\([^)]*\))?\s+from\s+[A-Z][a-z]+\s+\d{4}",
+                sentence,
+                flags=re.IGNORECASE,
+            ))
+            if candidates:
+                selected = candidates[-1]
+                yoy_value = signed_percent(selected.group(1), selected.group(2))
+
+    if yoy_value is None:
+        raise ValueError("Census retail sales release page에서 YoY 값을 찾지 못했습니다. MoM 숫자와 혼동하지 않도록 파싱을 중단했습니다.")
 
     date_value = datetime.now(KST).date().isoformat()
     release_match = re.search(r"FOR IMMEDIATE RELEASE:\s*[A-Za-z]+,\s+([A-Z][a-z]+\s+\d{1,2},\s+\d{4})", normalized)
@@ -1691,8 +1721,8 @@ def fetch_census_retail_sales_yoy_proxy():
     previous = {"date": date_value, "value": yoy_value}
 
     return {
-        "provider": "U.S. Census Retail Sales Release Page Proxy",
-        "series": "Census-retail-sales-yoy-proxy",
+        "provider": "U.S. Census Retail Sales Release Page YoY Proxy",
+        "series": "Census-retail-sales-yoy-proxy-fixed",
         "url": CENSUS_RETAIL_SALES_PAGE_URL,
         "latest": latest,
         "previous": previous,
@@ -2232,7 +2262,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-stable-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-mom-yoy-fix-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격, 소비축 지표 자동 업데이트가 실행되었습니다.",
@@ -2243,7 +2273,7 @@ def update_meta(data):
             "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
             "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq WTI Futures 프록시를 사용합니다.",
             "구리 가격은 FRED PCOPPUSDM을 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq Copper Futures 프록시를 사용합니다.",
-            "소매판매 YoY는 FRED RSXFS를 기반으로 계산하고, CPI YoY는 FRED CPIAUCSL을 기반으로 계산합니다.",
+            "소매판매 YoY는 FRED RSXFS를 기반으로 계산합니다. FRED 실패 시 Census 발표문에서 MoM이 아니라 YoY 문장만 추출합니다.",
             "Retail Sales - CPI 프록시는 소매판매 YoY에서 CPI YoY를 뺀 값으로, 소비가 인플레이션을 이기는지 확인하는 파생 지표입니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
@@ -2265,7 +2295,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption stable auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption MoM/YoY parsing fix auto update", flush=True)
 
     data = load_data()
 
@@ -2284,7 +2314,7 @@ def main():
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption stable auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption MoM/YoY parsing fix completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
