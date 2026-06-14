@@ -1,11 +1,11 @@
 {
   "schemaVersion": "1.0.0",
   "meta": {
-    "updatedAt": "2026-06-15T00:16:38+09:00",
+    "updatedAt": "2026-06-15T01:31:55+09:00",
     "week": "2026-W25",
     "timezone": "Asia/Seoul",
     "dataStatus": "partial-plus",
-    "automationStatus": "full-auto-broad-indicators-credit-revenue-fix-v1",
+    "automationStatus": "full-auto-broad-indicators-history-v1",
     "sourceMode": "mixed",
     "notes": [
       "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
