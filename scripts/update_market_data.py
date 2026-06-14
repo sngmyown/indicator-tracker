@@ -222,6 +222,12 @@ def fetch_fred_vix():
     return fetch_fred_series("VIXCLS")
 
 
+def fetch_fred_vxv():
+    # Cboe S&P 500 3-Month Volatility Index.
+    # VXVCLS is used only as a volatility-term proxy when direct VX1/VX2 futures data is unavailable.
+    return fetch_fred_series_recent("VXVCLS", years_back=1)
+
+
 def fetch_yahoo_vix():
     text = fetch_text(YAHOO_VIX_URL, retries=1, timeout=8)
     payload = json.loads(text)
@@ -347,6 +353,57 @@ def fetch_yahoo_vix6m():
     return fetch_yahoo_chart_close(YAHOO_VIX6M_URL, "^VIX6M", "Yahoo Finance Cboe 6-Month Volatility Index")
 
 
+def fetch_vix_vxv_proxy_from_current_data(data, upstream_error=None):
+    """Use the already-updated VIX value plus FRED VXVCLS as a robust fallback.
+
+    This is not a direct VX1/VX2 futures curve. It is a volatility index term proxy:
+    VIX spot (roughly 30-day implied vol) vs VXV/VIX3M (roughly 3-month implied vol).
+    It is more reliable than Yahoo futures proxy symbols in GitHub Actions and is marked
+    as proxy-auto-updated.
+    """
+    vix_item = find_indicator(data, "vix")
+    current_vix = vix_item.get("currentValue")
+    previous_vix = vix_item.get("previousValue")
+
+    if not is_number(current_vix):
+        # Fallback to FRED VIXCLS only if the current run did not produce a usable VIX value.
+        fred_vix = fetch_fred_series_recent("VIXCLS", years_back=1)
+        near_latest = fred_vix["latest"]
+        near_previous = fred_vix["previous"]
+        near_url = fred_vix.get("url")
+    else:
+        near_latest = {
+            "date": str(vix_item.get("actualDate") or datetime.now(KST).date().isoformat())[:10],
+            "value": round(float(current_vix), 4),
+        }
+        near_previous = {
+            "date": str(vix_item.get("previousDate") or vix_item.get("actualDate") or near_latest["date"])[:10],
+            "value": round(float(previous_vix), 4) if is_number(previous_vix) else round(float(current_vix), 4),
+        }
+        near_url = vix_item.get("sourceUrl", "data/latest.json:vix")
+
+    second = fetch_fred_vxv()
+
+    if upstream_error:
+        print(f"[vix-term-proxy] direct futures proxies failed, using VIX/VXV fallback. upstream={upstream_error}", flush=True)
+
+    return {
+        "provider": "FRED VIX/VXV Volatility Term Proxy",
+        "series": "VIXCLS/VXVCLS",
+        "url": f"{near_url} | {second.get('url')}",
+        "near": {
+            "provider": "Existing VIX or FRED VIXCLS",
+            "series": "VIXCLS",
+            "url": near_url,
+            "latest": near_latest,
+            "previous": near_previous,
+            "isProxy": True,
+        },
+        "second": second,
+        "isVolatilityIndexProxy": True,
+    }
+
+
 def fetch_vix_term_proxy_with_fallback():
     """Fallback when direct VIX futures quote proxies are unavailable.
 
@@ -357,6 +414,7 @@ def fetch_vix_term_proxy_with_fallback():
     errors = []
 
     proxy_pairs = [
+        ("FRED VIX/VXV Volatility Term Proxy", fetch_fred_vix, fetch_fred_vxv, "VIXCLS/VXVCLS"),
         ("Yahoo Finance VIX/VIX3M Volatility Term Proxy", fetch_yahoo_vix, fetch_yahoo_vix3m, "^VIX/^VIX3M"),
         ("Yahoo Finance VIX3M/VIX6M Volatility Term Proxy", fetch_yahoo_vix3m, fetch_yahoo_vix6m, "^VIX3M/^VIX6M"),
     ]
@@ -993,7 +1051,13 @@ def update_vix_futures_structure(data):
     item = find_indicator(data, "vix_futures_structure")
 
     try:
-        result = fetch_vix_futures_pair_with_fallback()
+        try:
+            result = fetch_vix_futures_pair_with_fallback()
+        except Exception as direct_error:
+            # Direct VIX futures proxy symbols are unstable in GitHub Actions.
+            # Use an already updated VIX value plus FRED VXVCLS as the final robust proxy.
+            result = fetch_vix_vxv_proxy_from_current_data(data, direct_error)
+
         near_latest = result["near"]["latest"]
         near_previous = result["near"]["previous"]
         second_latest = result["second"]["latest"]
@@ -3538,7 +3602,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-vix-futures-stable-v1",
+        "automationStatus": "full-auto-broad-indicators-vix-futures-vxv-fallback-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -3593,7 +3657,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-vix-futures-stable-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-vix-futures-vxv-fallback-v1", flush=True)
 
 
 if __name__ == "__main__":
