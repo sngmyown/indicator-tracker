@@ -31,6 +31,11 @@ YAHOO_COPPER_URL = "https://query1.finance.yahoo.com/v8/finance/chart/HG%3DF?ran
 CENSUS_RETAIL_SALES_PAGE_URL = "https://www.census.gov/retail/sales.html"
 BLS_CPI_SA_SERIES_ID = "CUSR0000SA0"
 BLS_CPI_NSA_SERIES_ID = "CUUR0000SA0"
+BLS_PAYEMS_SERIES_ID = "CES0000000001"
+BLS_AVG_HOURLY_EARNINGS_SERIES_ID = "CES0500000003"
+BLS_PPI_ALL_COMMODITIES_SERIES_ID = "WPU00000000"
+BLS_PPI_FINAL_DEMAND_SERIES_ID = "WPUFD4"
+FED_H15_FED_FUNDS_WEEKLY_URL = "https://www.federalreserve.gov/datadownload/Output.aspx?rel=H15&series=8e83f7f17c5cea4d190d85ae6737639f&lastObs=52&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package"
 
 
 YAHOO_SPY_URL = "https://query1.finance.yahoo.com/v8/finance/chart/SPY?range=1mo&interval=1d"
@@ -53,6 +58,14 @@ def fred_url(series_id):
 def treasury_yield_curve_url(month_yyyymm):
     query = urllib.parse.urlencode({
         "data": "daily_treasury_yield_curve",
+        "field_tdr_date_value_month": month_yyyymm,
+    })
+    return f"{TREASURY_YIELD_CURVE_BASE}?{query}"
+
+
+def treasury_real_yield_curve_url(month_yyyymm):
+    query = urllib.parse.urlencode({
+        "data": "daily_treasury_real_yield_curve",
         "field_tdr_date_value_month": month_yyyymm,
     })
     return f"{TREASURY_YIELD_CURVE_BASE}?{query}"
@@ -356,11 +369,14 @@ def parse_treasury_yield_curve_xml(text):
         if not date:
             continue
 
-        rows.append({
-            "date": date[:10],
-            "BC_2YEAR": row.get("BC_2YEAR"),
-            "BC_10YEAR": row.get("BC_10YEAR"),
-        })
+        parsed = {"date": date[:10]}
+        # Nominal curve fields such as BC_2YEAR/BC_10YEAR and real-yield curve fields
+        # such as TC_10YEAR are preserved. This makes the same XML parser work for
+        # both Treasury feeds.
+        for key, value in row.items():
+            if key != "NEW_DATE" and key != "NEWDATE" and key != "Date":
+                parsed[key] = value
+        rows.append(parsed)
 
     return rows
 
@@ -396,6 +412,104 @@ def fetch_rate_with_fallback(rate_name, fred_series, treasury_field):
     ]
 
     return fetch_with_fallback(rate_name, providers)
+
+
+def fetch_treasury_real_yield_curve(field_name="TC_10YEAR"):
+    errors = []
+
+    for month in month_candidates():
+        url = treasury_real_yield_curve_url(month)
+        try:
+            text = fetch_text(url, retries=1, timeout=10)
+            rows = parse_treasury_yield_curve_xml(text)
+            latest, previous = latest_two_from_rows(rows, value_key=field_name)
+            return {
+                "provider": "U.S. Treasury Real Yield XML Feed",
+                "series": field_name,
+                "url": url,
+                "latest": latest,
+                "previous": previous,
+                "isProxy": False,
+            }
+        except Exception as error:
+            message = f"Treasury real yield {field_name} {month}: {error}"
+            errors.append(message)
+            print(f"[treasury-real] provider failed: {message}", flush=True)
+
+    raise RuntimeError(" | ".join(errors))
+
+
+def fetch_real_10y_yield_with_fallback():
+    providers = [
+        ("FRED recent DFII10", lambda: fetch_fred_series_recent("DFII10", years_back=2)),
+        ("U.S. Treasury Real Yield XML Feed TC_10YEAR", lambda: fetch_treasury_real_yield_curve("TC_10YEAR")),
+    ]
+    return fetch_with_fallback("real_10y_yield", providers)
+
+
+def parse_federal_reserve_h15_csv_for_fed_funds(text):
+    rows = []
+    reader = csv.reader(StringIO(text))
+    header = None
+
+    for raw_row in reader:
+        row = [cell.strip() for cell in raw_row]
+        if not any(row):
+            continue
+
+        first = row[0].lower() if row else ""
+        if first in ("time period", "date") or first.startswith("time period"):
+            header = row
+            continue
+
+        if header is None:
+            continue
+
+        date = row[0] if row else ""
+        if not re.match(r"^\d{4}[-/]", date):
+            continue
+
+        value = None
+        for idx, cell in enumerate(row[1:], start=1):
+            if not cell or cell.upper() in ("ND", "NA", "."):
+                continue
+            label = header[idx] if idx < len(header) else ""
+            try:
+                numeric = float(cell)
+            except ValueError:
+                continue
+            if "RIFSPFF" in label or "Federal funds effective" in label or value is None:
+                value = numeric
+                if "RIFSPFF" in label or "Federal funds effective" in label:
+                    break
+
+        if value is not None:
+            rows.append({"date": date[:10], "value": value})
+
+    latest, previous = latest_two_from_rows(rows)
+    return latest, previous
+
+
+def fetch_h15_fed_funds_weekly():
+    text = fetch_text(FED_H15_FED_FUNDS_WEEKLY_URL, retries=1, timeout=12)
+    latest, previous = parse_federal_reserve_h15_csv_for_fed_funds(text)
+    return {
+        "provider": "Federal Reserve H.15 Data Download",
+        "series": "RIFSPFF_N.WW",
+        "url": FED_H15_FED_FUNDS_WEEKLY_URL,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
+def fetch_fed_funds_with_fallback():
+    providers = [
+        ("FRED recent DFF", lambda: fetch_fred_series_recent("DFF", years_back=2)),
+        ("FRED monthly FEDFUNDS", lambda: fetch_fred_series_recent("FEDFUNDS", years_back=5)),
+        ("Federal Reserve H.15 weekly EFFR", fetch_h15_fed_funds_weekly),
+    ]
+    return fetch_with_fallback("fed_funds_rate", providers)
 
 
 def fetch_with_fallback(label, providers):
@@ -1798,6 +1912,94 @@ def fetch_bls_monthly_yoy(series_id, label, years_back=5, is_proxy=False):
         "isProxy": is_proxy,
     }
 
+
+
+def fetch_bls_monthly_level_rows(series_id, years_back=8):
+    now = datetime.now(KST)
+    start_year = now.year - years_back
+    end_year = now.year
+    url = f"{BLS_PUBLIC_API_URL}{series_id}?startyear={start_year}&endyear={end_year}"
+    text = fetch_text(url, retries=2, timeout=12)
+    payload_json = json.loads(text)
+
+    status = payload_json.get("status")
+    if status not in ("REQUEST_SUCCEEDED", "REQUEST_SUCCEEDED_WITH_ERRORS"):
+        raise ValueError(f"BLS GET API status가 정상 범위가 아닙니다: {status}")
+
+    series_list = payload_json.get("Results", {}).get("series", [])
+    if not series_list:
+        raise ValueError("BLS GET API 응답에 Results.series가 없습니다.")
+
+    rows = []
+    for point in series_list[0].get("data", []):
+        year = point.get("year")
+        period = point.get("period")
+        value = point.get("value")
+        if not year or not period or not period.startswith("M") or period == "M13":
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        month = int(period[1:])
+        rows.append({"date": f"{int(year):04d}-{month:02d}-01", "value": numeric})
+
+    rows.sort(key=lambda row: row["date"])
+    if len(rows) < 2:
+        raise ValueError(f"{series_id} BLS 유효 데이터가 2개 미만입니다.")
+    return rows, url
+
+
+def fetch_bls_monthly_change(series_id, label, years_back=8, is_proxy=False):
+    rows, url = fetch_bls_monthly_level_rows(series_id, years_back=years_back)
+    change_rows = []
+    for index in range(1, len(rows)):
+        current = rows[index]
+        previous = rows[index - 1]
+        change_rows.append({"date": current["date"], "value": round(current["value"] - previous["value"], 4)})
+
+    latest, previous = latest_two_from_rows(change_rows)
+    return {
+        "provider": label,
+        "series": f"{series_id}-MoM-change",
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": is_proxy,
+    }
+
+
+def fetch_payems_change_with_fallback():
+    providers = [
+        ("FRED PAYEMS monthly change", lambda: fetch_fred_monthly_change("PAYEMS", years_back=5)),
+        ("BLS CES0000000001 total nonfarm monthly change", lambda: fetch_bls_monthly_change(BLS_PAYEMS_SERIES_ID, "BLS CES Total Nonfarm Employment", years_back=5, is_proxy=False)),
+    ]
+    return fetch_with_fallback("nonfarm_payrolls", providers)
+
+
+def fetch_average_hourly_earnings_yoy_with_fallback():
+    providers = [
+        ("FRED CES0500000003 YoY", lambda: fetch_fred_monthly_yoy("CES0500000003", years_back=6)),
+        ("BLS CES0500000003 YoY", lambda: fetch_bls_monthly_yoy(BLS_AVG_HOURLY_EARNINGS_SERIES_ID, "BLS Average Hourly Earnings", years_back=6, is_proxy=False)),
+    ]
+    return fetch_with_fallback("average_hourly_earnings", providers)
+
+
+def fetch_ppi_yoy_with_fallback():
+    providers = [
+        ("FRED PPIACO YoY", lambda: fetch_fred_monthly_yoy("PPIACO", years_back=8)),
+        ("BLS WPU00000000 All Commodities PPI YoY", lambda: fetch_bls_monthly_yoy(BLS_PPI_ALL_COMMODITIES_SERIES_ID, "BLS PPI All Commodities", years_back=8, is_proxy=False)),
+        ("BLS WPUFD4 Final Demand PPI YoY proxy", lambda: fetch_bls_monthly_yoy(BLS_PPI_FINAL_DEMAND_SERIES_ID, "BLS PPI Final Demand Proxy", years_back=8, is_proxy=True)),
+    ]
+    return fetch_with_fallback("ppi_yoy", providers)
+
+
+def fetch_credit_card_delinquency_with_fallback():
+    providers = [
+        ("FRED DRCCLACBS quarterly credit-card delinquency", lambda: fetch_fred_series_recent("DRCCLACBS", years_back=12)),
+    ]
+    return fetch_with_fallback("credit_card_delinquency", providers)
+
 def fetch_fred_monthly_yoy(series_id, years_back=8):
     """Fetch a FRED monthly level series and convert it to YoY % growth.
 
@@ -2538,7 +2740,7 @@ def update_real_10y_yield(data):
     today = now.date().isoformat()
     item = find_indicator(data, "real_10y_yield")
     try:
-        result = fetch_fred_series_recent("DFII10", years_back=2)
+        result = fetch_real_10y_yield_with_fallback()
         current = result["latest"]["value"]
         previous = result["previous"]["value"]
         change = round(current - previous, 4)
@@ -2562,7 +2764,7 @@ def update_fed_funds_rate(data):
     today = now.date().isoformat()
     item = find_indicator(data, "fed_funds_rate")
     try:
-        result = fetch_fred_series_recent("DFF", years_back=2)
+        result = fetch_fed_funds_with_fallback()
         current = result["latest"]["value"]
         previous = result["previous"]["value"]
         change = round(current - previous, 4)
@@ -2635,7 +2837,7 @@ def update_nonfarm_payrolls(data):
     today = now.date().isoformat()
     item = find_indicator(data, "nonfarm_payrolls")
     try:
-        result = fetch_fred_monthly_change("PAYEMS", years_back=5)
+        result = fetch_payems_change_with_fallback()
         current = result["latest"]["value"]
         signal, score = payrolls_signal(current)
         return update_generic_indicator(
@@ -2657,7 +2859,7 @@ def update_average_hourly_earnings(data):
     today = now.date().isoformat()
     item = find_indicator(data, "average_hourly_earnings")
     try:
-        result = fetch_fred_monthly_yoy("CES0500000003", years_back=6)
+        result = fetch_average_hourly_earnings_yoy_with_fallback()
         current = result["latest"]["value"]
         signal, score = wage_yoy_signal(current)
         return update_generic_indicator(
@@ -2786,7 +2988,7 @@ def update_credit_card_delinquency(data):
     today = now.date().isoformat()
     item = find_indicator(data, "credit_card_delinquency")
     try:
-        result = fetch_fred_series_recent("DRCCLACBS", years_back=8)
+        result = fetch_credit_card_delinquency_with_fallback()
         current = result["latest"]["value"]
         previous = result["previous"]["value"]
         change = round(current - previous, 4)
@@ -2801,8 +3003,23 @@ def update_credit_card_delinquency(data):
             "연체율이 상승하면 소매판매와 고용 지표를 함께 확인하고 소비 민감주 추격을 제한합니다.",
         ) | {"id": "credit_card_delinquency", "signal": signal, "score": score, "statusNote": "auto-updated"}
     except Exception as error:
-        mark_source_error(item, today, str(error))
-        return {"id": "credit_card_delinquency", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+        # 이 지표는 분기·은행권 계열이라 FRED가 실패하면 안정적인 무료 대체 소스가 제한적입니다.
+        # 기존 숫자가 있으면 보존하고 source-error로 표시합니다. 숫자가 전혀 없으면 수동 확인 대상으로 남깁니다.
+        if is_number(item.get("currentValue")):
+            mark_source_error(item, today, str(error))
+            return {"id": "credit_card_delinquency", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
+        item.update({
+            "currentValue": "manual-required",
+            "previousValue": "manual-required",
+            "statusNote": "manual-required",
+            "signal": "manual-required",
+            "score": 0,
+            "actualDate": today,
+            "interpretation": f"신용카드 연체율 자동 호출에 실패했습니다. 이 지표는 분기성 신용 지표라 수동 확인 대상으로 남깁니다. 오류: {str(error)[:300]}",
+            "marketReaction": "신용카드 연체율은 소비 둔화와 신용 스트레스 확인용 후행 지표입니다.",
+            "action": "화요일 리서치 루틴에서 최신 연체율을 직접 확인하고, 자동 소스가 안정화되면 다시 연결합니다.",
+        })
+        return {"id": "credit_card_delinquency", "signal": "manual-required", "score": 0, "value": "manual-required", "statusNote": "manual-required"}
 
 
 def update_extra_consumption(data):
@@ -2827,9 +3044,10 @@ def update_ppi_yoy(data):
     today = now.date().isoformat()
     item = find_indicator(data, "ppi_yoy")
     try:
-        result = fetch_fred_monthly_yoy("PPIACO", years_back=8)
+        result = fetch_ppi_yoy_with_fallback()
         current = result["latest"]["value"]
         signal, score = ppi_yoy_signal(current)
+        status_note = "proxy-auto-updated" if result.get("isProxy") else "auto-updated"
         return update_generic_indicator(
             item,
             result,
@@ -2838,7 +3056,8 @@ def update_ppi_yoy(data):
             f"PPI YoY는 {current:.2f}%입니다. 생산자물가는 기업 원가 압박의 선행 신호로 봅니다.",
             "PPI가 CPI보다 빠르게 오르면 마진 압박 가능성이 커집니다.",
             "PPI 상승률이 재가속되면 원자재·임금·가격전가력을 함께 확인합니다.",
-        ) | {"id": "ppi_yoy", "signal": signal, "score": score, "statusNote": "auto-updated"}
+            status_note=status_note,
+        ) | {"id": "ppi_yoy", "signal": signal, "score": score, "statusNote": status_note}
     except Exception as error:
         mark_source_error(item, today, str(error))
         return {"id": "ppi_yoy", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
@@ -2849,7 +3068,7 @@ def update_wage_cost_yoy(data):
     today = now.date().isoformat()
     item = find_indicator(data, "wage_cost_yoy")
     try:
-        result = fetch_fred_monthly_yoy("CES0500000003", years_back=6)
+        result = fetch_average_hourly_earnings_yoy_with_fallback()
         current = result["latest"]["value"]
         signal, score = wage_yoy_signal(current)
         return update_generic_indicator(
@@ -3037,11 +3256,11 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-flow-percent-fix-v1",
+        "automationStatus": "full-auto-broad-indicators-stable-sources-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
-            "이번 버전은 기존 VIX·2년물·10년물·신규 실업수당·실업률·달러·WTI·구리·소비 지표에 나머지 자동화 가능한 지표를 추가합니다.",
+            "이번 버전은 기존 자동화 지표에 더해 실질금리·정책금리·NFP·임금·PPI의 공식 대체 소스를 보강하고, ETF 흐름 프록시는 가격 변화율로 표시합니다.",
             "추가 금리 지표: 10Y-2Y 스프레드, 10년 실질금리, Effective Fed Funds Rate.",
             "추가 고용 지표: 비농업 고용자 수 변화, 시간당 평균 임금 YoY.",
             "자금흐름 축은 실제 ETF fund flow가 아니라 SPY/QQQ/IWM/SQQQ 가격 기반 프록시로 먼저 자동화했습니다.",
@@ -3067,7 +3286,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] broad remaining auto indicator update", flush=True)
+    print("[start] broad stable-source auto indicator update", flush=True)
 
     data = load_data()
 
@@ -3089,8 +3308,8 @@ def main():
 
     save_data(data)
 
-    print("[done] broad remaining auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-flow-percent-fix-v1", flush=True)
+    print("[done] broad stable-source auto indicator update completed", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-stable-sources-v1", flush=True)
 
 
 if __name__ == "__main__":
