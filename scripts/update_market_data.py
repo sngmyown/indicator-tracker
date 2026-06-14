@@ -2705,26 +2705,50 @@ def update_extra_employment(data):
 
 
 def update_single_flow_proxy(data, indicator_id, display_name):
+    """Update ETF flow proxy as price-change percentage, not ETF price level.
+
+    이 지표는 실제 ETF fund flow가 아닙니다. Yahoo/Stooq에서 가져오는 값은 ETF 종가입니다.
+    따라서 currentValue에 종가 자체를 넣으면 SPY 741.75 같은 가격이 '흐름 %'처럼 보이는 문제가 생깁니다.
+    이 함수는 종가를 원자료로 쓰되, 화면에 표시할 currentValue는 전일 대비 가격 변화율(%)로 저장합니다.
+    """
     now = datetime.now(KST)
     today = now.date().isoformat()
     item = find_indicator(data, indicator_id)
     try:
         result = fetch_flow_proxy_with_fallback(indicator_id)
-        current = result["latest"]["value"]
-        previous = result["previous"]["value"]
-        change_percent = percent_change(current, previous)
-        signal, score = flow_proxy_signal(indicator_id, change_percent)
-        info = update_generic_indicator(
-            item,
-            result,
-            signal,
-            score,
-            f"{display_name} 가격 흐름 프록시 최신값은 {current:.2f}, 전일 대비 변화율은 {change_percent:.2f}%입니다. 이는 실제 ETF 자금 유입액이 아니라 가격 기반 수급 프록시입니다.",
-            "가격 기반 프록시는 실제 fund flow보다 약하지만, 위험선호와 상대강도 확인에는 사용할 수 있습니다.",
-            "프록시 수급은 단독 판단하지 말고 거래량·섹터 ETF·지수 추세와 함께 확인합니다.",
-            status_note="proxy-auto-updated",
-        )
-        return {"id": indicator_id, "signal": signal, "score": score, "value": info["value"], "changePercent": info["changePercent"], "statusNote": "proxy-auto-updated"}
+        current_close = result["latest"]["value"]
+        previous_close = result["previous"]["value"]
+        flow_value = percent_change(current_close, previous_close)
+        signal, score = flow_proxy_signal(indicator_id, flow_value)
+        direction = direction_from_change(flow_value)
+        source = result.get("provider") or result.get("source") or "ETF price proxy"
+        source_series = result.get("series") or display_name
+        source_url = result.get("url") or ""
+        actual_date = result["latest"]["date"]
+
+        inverse_note = " SQQQ는 인버스 ETF이므로 상승은 헤지 수요 증가, 즉 시장에는 부정 신호로 해석합니다." if indicator_id == "sqqq_flow_proxy" else ""
+
+        item.update({
+            "source": source,
+            "sourceSeries": f"{source_series}-daily-change-percent-proxy",
+            "sourceUrl": source_url,
+            "currentValue": flow_value,
+            "previousValue": 0,
+            "unit": "%",
+            "actualDate": actual_date,
+            "direction": direction,
+            "change": flow_value,
+            "changePercent": flow_value,
+            "signal": signal,
+            "score": score,
+            "rawClose": current_close,
+            "rawPreviousClose": previous_close,
+            "interpretation": f"{display_name} 흐름 프록시는 전일 대비 가격 변화율 {flow_value:.2f}%입니다. 원자료 종가는 {current_close:.2f}, 직전 종가는 {previous_close:.2f}입니다. 이는 실제 ETF 자금 유입액이 아니라 가격 기반 수급 프록시입니다.{inverse_note}",
+            "marketReaction": "가격 기반 프록시는 실제 fund flow보다 약하지만, 위험선호와 상대강도 확인에는 사용할 수 있습니다.",
+            "action": "프록시 수급은 단독 판단하지 말고 거래량·섹터 ETF·지수 추세와 함께 확인합니다. 다음 단계에서는 실제 ETF flow 또는 거래량 데이터를 보강합니다.",
+            "statusNote": "proxy-auto-updated",
+        })
+        return {"id": indicator_id, "signal": signal, "score": score, "value": flow_value, "changePercent": flow_value, "statusNote": "proxy-auto-updated"}
     except Exception as error:
         mark_source_error(item, today, str(error))
         return {"id": indicator_id, "signal": "source-error", "score": 0, "value": item.get("currentValue"), "changePercent": "source-error", "statusNote": "source-error"}
@@ -3013,7 +3037,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-v1",
+        "automationStatus": "full-auto-broad-indicators-flow-percent-fix-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -3066,7 +3090,7 @@ def main():
     save_data(data)
 
     print("[done] broad remaining auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-flow-percent-fix-v1", flush=True)
 
 
 if __name__ == "__main__":
