@@ -20,6 +20,12 @@ YAHOO_VIX_FUTURE_NEAR_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%
 YAHOO_VIX_FUTURE_SECOND_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVW2VX?range=1mo&interval=1d"
 YAHOO_VIX_FUTURE_FIRST_MONTH_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVFTW1?range=1mo&interval=1d"
 YAHOO_VIX_FUTURE_SECOND_MONTH_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVFTW2?range=1mo&interval=1d"
+YAHOO_VIX_FUTURE_VXIND1_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVXIND1?range=1mo&interval=1d"
+YAHOO_VIX_FUTURE_VXIND2_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVXIND2?range=1mo&interval=1d"
+YAHOO_VIX_FUTURE_VX1_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVX1?range=1mo&interval=1d"
+YAHOO_VIX_FUTURE_VX2_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVX2?range=1mo&interval=1d"
+YAHOO_VIX3M_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX3M?range=1mo&interval=1d"
+YAHOO_VIX6M_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX6M?range=1mo&interval=1d"
 STOOQ_VIX_URL = "https://stooq.com/q/d/l/?s=%5Evix&i=d"
 TREASURY_YIELD_CURVE_BASE = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
 DOL_AR539_CSV_URL = "https://oui.doleta.gov/unemploy/csv/ar539.csv"
@@ -317,16 +323,81 @@ def fetch_yahoo_vix_future_second_month():
     return fetch_yahoo_chart_close(YAHOO_VIX_FUTURE_SECOND_MONTH_URL, "^VFTW2", "Yahoo Finance Cboe 2nd Month VIX Futures")
 
 
+def fetch_yahoo_vix_future_vxind1():
+    return fetch_yahoo_chart_close(YAHOO_VIX_FUTURE_VXIND1_URL, "^VXIND1", "Yahoo Finance Cboe VX Futures 1st Near-Term")
+
+
+def fetch_yahoo_vix_future_vxind2():
+    return fetch_yahoo_chart_close(YAHOO_VIX_FUTURE_VXIND2_URL, "^VXIND2", "Yahoo Finance Cboe VX Futures 2nd Near-Term")
+
+
+def fetch_yahoo_vix_future_vx1():
+    return fetch_yahoo_chart_close(YAHOO_VIX_FUTURE_VX1_URL, "^VX1", "Yahoo Finance VIX Futures 1st Contract")
+
+
+def fetch_yahoo_vix_future_vx2():
+    return fetch_yahoo_chart_close(YAHOO_VIX_FUTURE_VX2_URL, "^VX2", "Yahoo Finance VIX Futures 2nd Contract")
+
+
+def fetch_yahoo_vix3m():
+    return fetch_yahoo_chart_close(YAHOO_VIX3M_URL, "^VIX3M", "Yahoo Finance Cboe 3-Month Volatility Index")
+
+
+def fetch_yahoo_vix6m():
+    return fetch_yahoo_chart_close(YAHOO_VIX6M_URL, "^VIX6M", "Yahoo Finance Cboe 6-Month Volatility Index")
+
+
+def fetch_vix_term_proxy_with_fallback():
+    """Fallback when direct VIX futures quote proxies are unavailable.
+
+    This is not the same as VX1/VX2 futures. It uses the Cboe volatility index term curve
+    (^VIX vs ^VIX3M, or ^VIX3M vs ^VIX6M) as a market stress proxy. It is kept as
+    proxy-auto-updated and the interpretation explicitly states the limitation.
+    """
+    errors = []
+
+    proxy_pairs = [
+        ("Yahoo Finance VIX/VIX3M Volatility Term Proxy", fetch_yahoo_vix, fetch_yahoo_vix3m, "^VIX/^VIX3M"),
+        ("Yahoo Finance VIX3M/VIX6M Volatility Term Proxy", fetch_yahoo_vix3m, fetch_yahoo_vix6m, "^VIX3M/^VIX6M"),
+    ]
+
+    for provider, near_fetcher, second_fetcher, series in proxy_pairs:
+        try:
+            near = near_fetcher()
+            second = second_fetcher()
+            return {
+                "provider": provider,
+                "series": series,
+                "url": f"{near.get('url')} | {second.get('url')}",
+                "near": near,
+                "second": second,
+                "isVolatilityIndexProxy": True,
+            }
+        except Exception as error:
+            errors.append(f"{provider}: {error}")
+            print(f"[vix-term-proxy-failed] {provider}: {error}", flush=True)
+
+    raise RuntimeError("VIX volatility term proxy fallback 모두 실패: " + " | ".join(errors))
+
+
 def fetch_vix_futures_pair_with_fallback():
     """Fetch front/second VIX futures proxies and calculate the curve.
 
-    1차는 Yahoo의 Cboe near-term/second-term VIX future continuous indexes(^VW1VX/^VW2VX)입니다.
-    2차는 Yahoo의 1st/2nd month VIX futures indexes(^VFTW1/^VFTW2)입니다.
-    둘 다 Cboe 원천 VIX futures 구조를 반영하는 지수형 프록시이므로 statusNote는 proxy-auto-updated로 표시합니다.
+    우선순위:
+    1. Yahoo ^VW1VX/^VW2VX
+    2. Yahoo ^VXIND1/^VXIND2
+    3. Yahoo ^VFTW1/^VFTW2
+    4. Yahoo ^VX1/^VX2
+    5. 최후 수단: ^VIX/^VIX3M 또는 ^VIX3M/^VIX6M 변동성 만기구조 프록시
+
+    직접 VX1/VX2 선물값이 막히는 경우가 있어 프록시를 여러 겹으로 둡니다.
+    최후 수단은 선물 구조 그 자체가 아니므로 interpretation에 명확히 표시합니다.
     """
     providers = [
         ("Yahoo Finance Cboe VIX Futures Term Index", fetch_yahoo_vix_future_near_term, fetch_yahoo_vix_future_second_term, "^VW1VX/^VW2VX"),
+        ("Yahoo Finance Cboe VX Futures Near-Term Index", fetch_yahoo_vix_future_vxind1, fetch_yahoo_vix_future_vxind2, "^VXIND1/^VXIND2"),
         ("Yahoo Finance Cboe VIX Futures Month Index", fetch_yahoo_vix_future_first_month, fetch_yahoo_vix_future_second_month, "^VFTW1/^VFTW2"),
+        ("Yahoo Finance VIX Futures Contract Index", fetch_yahoo_vix_future_vx1, fetch_yahoo_vix_future_vx2, "^VX1/^VX2"),
     ]
 
     errors = []
@@ -340,13 +411,18 @@ def fetch_vix_futures_pair_with_fallback():
                 "url": f"{near.get('url')} | {second.get('url')}",
                 "near": near,
                 "second": second,
+                "isVolatilityIndexProxy": False,
             }
         except Exception as error:
             errors.append(f"{provider}: {error}")
             print(f"[vix-futures-failed] {provider}: {error}", flush=True)
 
-    raise RuntimeError("VIX futures pair fallback 모두 실패: " + " | ".join(errors))
+    try:
+        return fetch_vix_term_proxy_with_fallback()
+    except Exception as proxy_error:
+        errors.append(str(proxy_error))
 
+    raise RuntimeError("VIX futures pair fallback 모두 실패: " + " | ".join(errors))
 
 def fetch_stooq_vix():
     text = fetch_text(STOOQ_VIX_URL, retries=1, timeout=8)
@@ -929,7 +1005,7 @@ def update_vix_futures_structure(data):
         prev_vx2 = second_previous["value"]
 
         if not vx1:
-            raise ValueError("VX1 값이 0 또는 비어 있습니다.")
+            raise ValueError("VX1/near-term proxy 값이 0 또는 비어 있습니다.")
 
         spread_percent = round(((vx2 - vx1) / vx1) * 100, 4)
         previous_spread = round(((prev_vx2 - prev_vx1) / prev_vx1) * 100, 4) if prev_vx1 else 0
@@ -945,13 +1021,28 @@ def update_vix_futures_structure(data):
             vix_spot = None
 
         signal, score, structure_label = vix_term_structure_signal(spread_percent, vix_spot, vx1, vx2)
+        is_vol_proxy = bool(result.get("isVolatilityIndexProxy"))
+
+        if is_vol_proxy:
+            source_series_suffix = "volatility-index-term-proxy-spread"
+            term_name = "변동성 만기구조 프록시"
+            method_note = "직접 VIX 선물값이 아니라 Cboe VIX 계열 변동성 지수의 만기구조 프록시입니다."
+            near_label = result["series"].split("/")[0]
+            second_label = result["series"].split("/")[1] if "/" in result["series"] else "second-term proxy"
+        else:
+            source_series_suffix = "vix-futures-term-structure-spread"
+            term_name = "VIX 선물 구조"
+            method_note = "근월물과 차근월물 성격의 VIX futures proxy를 이용한 구조입니다."
+            near_label = "VX1"
+            second_label = "VX2"
+
         spot_note = ""
         if is_number(vix_spot):
-            spot_note = f" VIX 현물은 {vix_spot:.2f}, VX1은 {vx1:.2f}, VX2는 {vx2:.2f}입니다."
+            spot_note = f" VIX 현물은 {vix_spot:.2f}, {near_label}은 {vx1:.2f}, {second_label}는 {vx2:.2f}입니다."
 
         item.update({
             "source": result["provider"],
-            "sourceSeries": f"{result['series']}-term-structure-spread",
+            "sourceSeries": f"{result['series']}-{source_series_suffix}",
             "sourceUrl": result["url"],
             "currentValue": spread_percent,
             "previousValue": previous_spread,
@@ -963,15 +1054,18 @@ def update_vix_futures_structure(data):
             "signal": signal,
             "score": score,
             "termStructure": structure_label,
+            "termStructureMethod": term_name,
             "vx1": vx1,
             "vx2": vx2,
+            "vx1Label": near_label,
+            "vx2Label": second_label,
             "vixSpot": vix_spot if is_number(vix_spot) else "not-available",
-            "interpretation": f"VIX 선물 구조는 {structure_label}입니다. 계산식은 (VX2 - VX1) / VX1 × 100이며 현재 스프레드는 {spread_percent:.2f}%입니다.{spot_note} 콘탱고는 정상 시장 구조, 백워데이션은 단기 공포와 헤지 수요 급증으로 해석합니다.",
-            "marketReaction": "VX2가 VX1보다 높으면 콘탱고로 위험선호가 유지되는 정상 구조에 가깝고, VX1이 VX2보다 높아지면 단기 변동성 수요가 급해진 것으로 봅니다.",
+            "interpretation": f"{term_name}는 {structure_label}입니다. 계산식은 ({second_label} - {near_label}) / {near_label} × 100이며 현재 스프레드는 {spread_percent:.2f}%입니다. {method_note}{spot_note} 콘탱고는 정상 시장 구조, 백워데이션은 단기 공포와 헤지 수요 급증으로 해석합니다.",
+            "marketReaction": f"{second_label}가 {near_label}보다 높으면 콘탱고로 위험선호가 유지되는 정상 구조에 가깝고, {near_label}이 {second_label}보다 높아지면 단기 변동성 수요가 급해진 것으로 봅니다.",
             "action": "백워데이션이면 신규 매수보다 리스크 관리와 현금 비중을 우선하고, 깊은 백워데이션에서 VIX 급등 후 둔화가 나오면 단기 바닥 후보로 관찰합니다. 콘탱고에서는 VIX 현물과 자금흐름 축을 함께 확인합니다.",
             "statusNote": "proxy-auto-updated",
         })
-        print(f"[update] VIX futures structure {structure_label} {spread_percent}%", flush=True)
+        print(f"[update] VIX futures/term structure {structure_label} {spread_percent}% via {result['provider']}", flush=True)
         update_volatility_summary_with_futures(data)
         return {"id": "vix_futures_structure", "signal": signal, "score": score, "value": spread_percent, "statusNote": "proxy-auto-updated"}
 
@@ -980,7 +1074,6 @@ def update_vix_futures_structure(data):
         print(f"[update] VIX futures structure source-error: {error}", flush=True)
         update_volatility_summary_with_futures(data)
         return {"id": "vix_futures_structure", "signal": "source-error", "score": 0, "value": item.get("currentValue"), "statusNote": "source-error"}
-
 
 def update_volatility_summary_with_futures(data):
     try:
@@ -3445,7 +3538,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-vix-futures-v1",
+        "automationStatus": "full-auto-broad-indicators-vix-futures-stable-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -3500,7 +3593,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-vix-futures-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-vix-futures-stable-v1", flush=True)
 
 
 if __name__ == "__main__":
