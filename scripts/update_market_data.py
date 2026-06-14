@@ -1613,6 +1613,394 @@ def update_dollar_commodities_summary(data, updates):
         "watchAxes": ["rates", "employment", "dollar-commodities", "flows", "volatility"],
     })
 
+
+def fetch_fred_monthly_yoy(series_id, years_back=8):
+    """Fetch a FRED monthly level series and convert it to YoY % growth.
+
+    RSXFS, CPIAUCSL 같은 월간 레벨 지표는 시장 판단에서 절대 레벨보다
+    전년동월 대비 증가율이 더 직관적입니다. 여기서는 최신 YoY와 직전월 YoY를 계산합니다.
+    """
+    now = datetime.now(KST)
+    start_year = max(1900, now.year - years_back)
+    start_date = f"{start_year}-01-01"
+    url = f"{fred_url(series_id)}&cosd={start_date}"
+    text = fetch_text(url, retries=2, timeout=10)
+    reader = csv.DictReader(StringIO(text))
+
+    level_rows = []
+    for row in reader:
+        date = row.get("observation_date")
+        raw_value = row.get(series_id)
+        if not date or raw_value in (None, "", "."):
+            continue
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        level_rows.append({
+            "date": str(date)[:10],
+            "value": value,
+        })
+
+    level_rows.sort(key=lambda row: row["date"])
+
+    yoy_rows = []
+    for index in range(12, len(level_rows)):
+        current = level_rows[index]
+        prior_year = level_rows[index - 12]
+        if prior_year["value"] == 0:
+            continue
+        yoy_value = round((current["value"] / prior_year["value"] - 1) * 100, 4)
+        yoy_rows.append({
+            "date": current["date"],
+            "value": yoy_value,
+        })
+
+    latest, previous = latest_two_from_rows(yoy_rows)
+    return {
+        "provider": "FRED YoY calculation",
+        "series": f"{series_id}-YoY",
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": False,
+    }
+
+
+def fetch_retail_sales_yoy_with_fallback():
+    providers = [
+        ("FRED RSXFS YoY", lambda: fetch_fred_monthly_yoy("RSXFS", years_back=8)),
+    ]
+
+    return fetch_with_fallback("retail_sales_yoy", providers)
+
+
+def fetch_cpi_yoy_with_fallback():
+    providers = [
+        ("FRED CPIAUCSL YoY", lambda: fetch_fred_monthly_yoy("CPIAUCSL", years_back=8)),
+    ]
+
+    return fetch_with_fallback("cpi_yoy", providers)
+
+
+def retail_sales_yoy_signal(value, change):
+    """소매판매 YoY 해석 기준.
+
+    명목 소매판매가 높아도 인플레이션보다 낮으면 실질 수요는 약할 수 있습니다.
+    그래서 여기서는 단독 점수는 보수적으로 주고, 최종 판단은 real_retail_sales_proxy에서 강화합니다.
+    """
+    if value >= 4.0 and change >= -0.5:
+        return "positive", 1
+
+    if value <= 1.0 or change <= -1.5:
+        return "negative", -1
+
+    return "neutral", 0
+
+
+def cpi_yoy_signal(value, change):
+    """CPI YoY 해석 기준.
+
+    소비축에서 CPI는 수요 그 자체가 아니라 소비 구매력을 갉아먹는 압력입니다.
+    높은 CPI 또는 재가속은 부정, 안정적 둔화는 긍정으로 해석합니다.
+    """
+    if value >= 4.0 or change >= 0.3:
+        return "negative", -1
+
+    if value <= 3.0 and change <= 0:
+        return "positive", 1
+
+    return "neutral", 0
+
+
+def real_retail_sales_proxy_signal(value, change):
+    """Retail Sales YoY - CPI YoY 프록시 해석 기준.
+
+    양수면 명목 소매판매 증가율이 인플레이션보다 높아 실질 소비 여력이 상대적으로 양호하다고 봅니다.
+    음수면 매출 증가가 물가를 못 따라가는 구간으로 소비축에는 부담입니다.
+    """
+    if value >= 1.0:
+        return "positive", 1
+
+    if value <= 0:
+        return "negative", -1
+
+    return "neutral", 0
+
+
+def update_retail_sales_yoy(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "retail_sales_yoy")
+
+    try:
+        result = fetch_retail_sales_yoy_with_fallback()
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change = round(current_value - previous_value, 4)
+        signal, score = retail_sales_yoy_signal(current_value, change)
+
+        interpretation = f"소매판매 YoY는 {current_value:.2f}%입니다. 데이터 출처는 {result['provider']}입니다. 명목 소비 증가율이므로 CPI와 함께 봐야 합니다."
+        market_reaction = "소매판매 증가율이 양호하면 기업 매출 체력에는 우호적입니다. 단, 인플레이션보다 낮으면 실질 소비는 약할 수 있습니다."
+        action = "소매판매 단독으로 판단하지 말고, CPI YoY와의 차이인 Retail Sales - CPI 프록시를 확인합니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note="auto-updated",
+        )
+        item["unit"] = "%"
+
+        print("[update] retail_sales_yoy auto-updated", flush=True)
+        return {
+            "id": "retail_sales_yoy",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "previousValue": info["previousValue"],
+            "change": info["change"],
+            "changePercent": info["changePercent"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": "auto-updated",
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] retail_sales_yoy source-error", flush=True)
+        return {
+            "id": "retail_sales_yoy",
+            "signal": item.get("signal", "source-error"),
+            "score": item.get("score", 0) if is_number(item.get("currentValue")) else 0,
+            "value": item.get("currentValue", "source-error"),
+            "previousValue": item.get("previousValue", "source-error"),
+            "change": item.get("change", "source-error"),
+            "changePercent": item.get("changePercent", "source-error"),
+            "date": item.get("actualDate", today),
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_cpi_yoy(data):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "cpi_yoy")
+
+    try:
+        result = fetch_cpi_yoy_with_fallback()
+        current_value = result["latest"]["value"]
+        previous_value = result["previous"]["value"]
+        change = round(current_value - previous_value, 4)
+        signal, score = cpi_yoy_signal(current_value, change)
+
+        interpretation = f"CPI YoY는 {current_value:.2f}%입니다. 데이터 출처는 {result['provider']}입니다. 소비축에서는 CPI를 구매력 압력으로 해석합니다."
+        market_reaction = "CPI 둔화는 실질 소비 여력과 금리 부담 완화에 우호적입니다. CPI 재가속은 소비와 멀티플에 부담이 될 수 있습니다."
+        action = "CPI가 재가속되면 Retail Sales - CPI 프록시와 금리 축을 함께 확인합니다."
+
+        info = update_indicator_success(
+            item,
+            result,
+            signal,
+            score,
+            interpretation,
+            market_reaction,
+            action,
+            status_note="auto-updated",
+        )
+        item["unit"] = "%"
+
+        print("[update] cpi_yoy auto-updated", flush=True)
+        return {
+            "id": "cpi_yoy",
+            "signal": signal,
+            "score": score,
+            "value": info["currentValue"],
+            "previousValue": info["previousValue"],
+            "change": info["change"],
+            "changePercent": info["changePercent"],
+            "date": info["actualDate"],
+            "provider": info["provider"],
+            "statusNote": "auto-updated",
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] cpi_yoy source-error", flush=True)
+        return {
+            "id": "cpi_yoy",
+            "signal": item.get("signal", "source-error"),
+            "score": item.get("score", 0) if is_number(item.get("currentValue")) else 0,
+            "value": item.get("currentValue", "source-error"),
+            "previousValue": item.get("previousValue", "source-error"),
+            "change": item.get("change", "source-error"),
+            "changePercent": item.get("changePercent", "source-error"),
+            "date": item.get("actualDate", today),
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_real_retail_sales_proxy(data, retail_update, cpi_update):
+    now = datetime.now(KST)
+    today = now.date().isoformat()
+    item = find_indicator(data, "real_retail_sales_proxy")
+
+    try:
+        retail_value = parse_number(retail_update.get("value"))
+        cpi_value = parse_number(cpi_update.get("value"))
+        retail_previous = parse_number(retail_update.get("previousValue"))
+        cpi_previous = parse_number(cpi_update.get("previousValue"))
+
+        current_value = round(retail_value - cpi_value, 4)
+        previous_value = round(retail_previous - cpi_previous, 4)
+        change = round(current_value - previous_value, 4)
+        change_percent = percent_change(current_value, previous_value) if previous_value != 0 else 0
+        direction = direction_from_change(change)
+        signal, score = real_retail_sales_proxy_signal(current_value, change)
+
+        latest_date = max(str(retail_update.get("date", today)), str(cpi_update.get("date", today)))
+        source_note = f"RSXFS YoY {retail_value:.2f}% - CPIAUCSL YoY {cpi_value:.2f}%"
+
+        item.update({
+            "source": "Derived from FRED RSXFS YoY and CPIAUCSL YoY",
+            "sourceSeries": "RSXFS-YoY-minus-CPIAUCSL-YoY",
+            "sourceUrl": "https://fred.stlouisfed.org/",
+            "currentValue": current_value,
+            "previousValue": previous_value,
+            "unit": "%p",
+            "actualDate": latest_date,
+            "direction": direction,
+            "change": change,
+            "changePercent": change_percent,
+            "signal": signal,
+            "score": score,
+            "interpretation": f"Retail Sales - CPI 프록시는 {current_value:.2f}%p입니다. 계산식은 {source_note}입니다. 양수면 명목 소비 증가율이 인플레이션을 이긴 구간입니다.",
+            "marketReaction": "이 프록시가 양수면 소비가 물가를 넘어서는 힘을 보인다는 뜻이라 임의소비재와 기업 매출 체력에 우호적입니다. 음수면 소비축은 약해진 것으로 봅니다.",
+            "action": "프록시가 음수로 전환되면 소비 민감주 추격 매수를 줄이고, 신용카드 연체율과 고용축을 함께 확인합니다.",
+            "statusNote": "auto-updated",
+        })
+
+        print("[update] real_retail_sales_proxy auto-updated", flush=True)
+        return {
+            "id": "real_retail_sales_proxy",
+            "signal": signal,
+            "score": score,
+            "value": current_value,
+            "previousValue": previous_value,
+            "change": change,
+            "changePercent": change_percent,
+            "date": latest_date,
+            "provider": "derived",
+            "statusNote": "auto-updated",
+        }
+
+    except Exception as error:
+        error_message = str(error)
+        mark_source_error(item, today, error_message)
+        print("[update] real_retail_sales_proxy source-error", flush=True)
+        return {
+            "id": "real_retail_sales_proxy",
+            "signal": item.get("signal", "source-error"),
+            "score": item.get("score", 0) if is_number(item.get("currentValue")) else 0,
+            "value": item.get("currentValue", "source-error"),
+            "previousValue": item.get("previousValue", "source-error"),
+            "change": item.get("change", "source-error"),
+            "changePercent": item.get("changePercent", "source-error"),
+            "date": item.get("actualDate", today),
+            "provider": "source-error",
+            "statusNote": "source-error",
+        }
+
+
+def update_consumption(data):
+    retail_update = update_retail_sales_yoy(data)
+    cpi_update = update_cpi_yoy(data)
+    real_proxy_update = update_real_retail_sales_proxy(data, retail_update, cpi_update)
+
+    updates = [retail_update, cpi_update, real_proxy_update]
+    update_consumption_summary(data, updates)
+
+
+def format_percent_value(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.2f}%"
+    return str(value)
+
+
+def format_percent_point_value(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.2f}%p"
+    return str(value)
+
+
+def update_consumption_summary(data, updates):
+    by_id = {item["id"]: item for item in updates}
+    retail = by_id.get("retail_sales_yoy", {})
+    cpi = by_id.get("cpi_yoy", {})
+    real_proxy = by_id.get("real_retail_sales_proxy", {})
+
+    score = sum(item.get("score", 0) for item in updates)
+    all_source_error = all(item.get("signal") == "source-error" for item in updates)
+
+    if all_source_error:
+        status = "source-error"
+    else:
+        status = axis_status_from_score(score)
+
+    retail_signal = retail.get("signal", "source-error")
+    cpi_signal = cpi.get("signal", "source-error")
+    real_signal = real_proxy.get("signal", "source-error")
+
+    retail_value_text = format_percent_value(retail.get("value"))
+    cpi_value_text = format_percent_value(cpi.get("value"))
+    real_value_text = format_percent_point_value(real_proxy.get("value"))
+
+    data.setdefault("axisSummary", {})
+    if "consumption" in data["axisSummary"]:
+        data["axisSummary"]["consumption"].update({
+            "status": status,
+            "score": score,
+            "leadingStatus": real_signal,
+            "coincidentStatus": retail_signal,
+            "laggingStatus": "warning",
+            "summary": f"소매판매 YoY는 {retail_value_text}, CPI YoY는 {cpi_value_text}, Retail Sales - CPI 프록시는 {real_value_text}입니다.",
+            "interpretation": "소비축에서는 명목 소매판매보다 인플레이션을 이긴 실질 소비 여부가 중요합니다. Retail Sales - CPI 프록시가 양수이면 소비가 물가를 넘어서는 구간이고, 음수이면 매출 증가가 물가를 따라가지 못하는 구간입니다.",
+            "action": "Retail Sales - CPI 프록시가 음수로 전환되면 소비 민감주와 리테일 종목 추격 매수를 제한하고, 고용축과 신용카드 연체율을 함께 확인합니다.",
+        })
+
+    data.setdefault("matrix", {})
+    if "consumption" in data["matrix"]:
+        data["matrix"]["consumption"].update({
+            "leading": real_signal,
+            "coincident": retail_signal,
+            "lagging": "warning",
+        })
+
+    data.setdefault("timingSummary", {})
+    if "coincident" in data["timingSummary"]:
+        data["timingSummary"]["coincident"].update({
+            "status": status,
+            "summary": f"소비축은 소매판매 {retail_value_text}, CPI {cpi_value_text}, 실질 소비 프록시 {real_value_text}입니다.",
+        })
+
+    data.setdefault("marketSummary", {})
+    data["marketSummary"].update({
+        "marketCondition": "neutral",
+        "marketConditionLabel": "VIX + 금리 + 고용 + 달러/원자재 + 소비 자동 업데이트 6단계",
+        "riskMode": "balanced",
+        "summary": "VIX, 금리, 고용, 달러/원자재, 소비축 주요 지표 자동 업데이트가 실행되었습니다. 아직 실적·자금흐름·마진 축은 부분 수동 확인이 필요합니다.",
+        "conflictSummary": "소비축은 Retail Sales - CPI 프록시를 통해 명목 매출 증가가 물가를 이기는지 확인합니다. 고용이 강하고 실질 소비 프록시가 양수이면 경기 체력은 긍정적이고, 고용 둔화와 프록시 음수가 겹치면 방어 모드가 필요합니다.",
+        "watchAxes": ["rates", "employment", "consumption", "dollar-commodities", "flows", "volatility"],
+    })
+
 def update_volatility_summary(data, vix_status, change_status, vix_value, change_percent, actual_date, provider):
     score = 0
 
@@ -1695,10 +2083,10 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-update-v1",
         "sourceMode": "mixed",
         "notes": [
-            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격 자동 업데이트가 실행되었습니다.",
+            "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격, 소비축 지표 자동 업데이트가 실행되었습니다.",
             "VIX는 FRED, Yahoo Finance, Stooq 순서로 시도합니다.",
             "2년물/10년물 금리는 FRED, U.S. Treasury XML Feed 순서로 시도합니다.",
             "신규 실업수당 청구건수는 FRED ICSA를 먼저 시도하고, 실패 시 DOL ETA 539 원자료 프록시를 사용합니다.",
@@ -1706,6 +2094,8 @@ def update_meta(data):
             "달러 지수는 FRED DTWEXBGS를 먼저 시도하고, 실패 시 Stooq Dollar Index Futures 프록시를 사용합니다.",
             "WTI는 FRED DCOILWTICO를 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq WTI Futures 프록시를 사용합니다.",
             "구리 가격은 FRED PCOPPUSDM을 먼저 시도하고, 실패 시 Yahoo Finance 또는 Stooq Copper Futures 프록시를 사용합니다.",
+            "소매판매 YoY는 FRED RSXFS를 기반으로 계산하고, CPI YoY는 FRED CPIAUCSL을 기반으로 계산합니다.",
+            "Retail Sales - CPI 프록시는 소매판매 YoY에서 CPI YoY를 뺀 값으로, 소비가 인플레이션을 이기는지 확인하는 파생 지표입니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "나머지 지표는 다음 단계에서 순차적으로 자동화합니다.",
         ],
@@ -1726,7 +2116,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper safe auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption safe auto update", flush=True)
 
     data = load_data()
 
@@ -1738,13 +2128,14 @@ def main():
     update_rates(data)
     update_employment(data)
     update_dollar_commodities(data)
+    update_consumption(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption safe auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
