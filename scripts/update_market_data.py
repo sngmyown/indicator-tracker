@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -27,6 +28,9 @@ YAHOO_DOLLAR_INDEX_ALT_URL = "https://query1.finance.yahoo.com/v8/finance/chart/
 YAHOO_WTI_URL = "https://query1.finance.yahoo.com/v8/finance/chart/CL%3DF?range=1mo&interval=1d"
 STOOQ_COPPER_URL = "https://stooq.com/q/d/l/?s=hg.f&i=d"
 YAHOO_COPPER_URL = "https://query1.finance.yahoo.com/v8/finance/chart/HG%3DF?range=1mo&interval=1d"
+CENSUS_RETAIL_SALES_PAGE_URL = "https://www.census.gov/retail/sales.html"
+BLS_CPI_SA_SERIES_ID = "CUSR0000SA0"
+BLS_CPI_NSA_SERIES_ID = "CUUR0000SA0"
 
 
 def fred_url(series_id):
@@ -1196,7 +1200,7 @@ def update_unemployment_rate(data):
             interpretation,
             market_reaction,
             action,
-            status_note="auto-updated",
+            status_note=status_note,
         )
 
         print("[update] unemployment_rate auto-updated", flush=True)
@@ -1614,6 +1618,143 @@ def update_dollar_commodities_summary(data, updates):
     })
 
 
+
+def month_name_to_number(month_name):
+    months = {
+        "January": 1,
+        "February": 2,
+        "March": 3,
+        "April": 4,
+        "May": 5,
+        "June": 6,
+        "July": 7,
+        "August": 8,
+        "September": 9,
+        "October": 10,
+        "November": 11,
+        "December": 12,
+    }
+    return months.get(month_name)
+
+
+def normalize_html_text(text):
+    text = re.sub(r"<script[\s\S]*?</script>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def fetch_census_retail_sales_yoy_proxy():
+    """Fallback retail-sales YoY from the Census retail sales release page.
+
+    이 fallback은 FRED RSXFS가 실패할 때 쓰는 프록시입니다. Census release page의
+    문장형 발표에서 전년 대비 증가율을 추출하므로, FRED 월간 시계열보다 정교한
+    previousValue를 제공하지 못합니다. 따라서 previousValue는 currentValue와 동일하게
+    두고, statusNote는 proxy-auto-updated로 처리합니다.
+    """
+    text = fetch_text(CENSUS_RETAIL_SALES_PAGE_URL, retries=2, timeout=12)
+    normalized = normalize_html_text(text)
+
+    patterns = [
+        # Retail trade sales were ... up 5.2 percent ... from last year.
+        r"Retail trade sales were[\s\S]{0,300}?up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,180}?from last year",
+        # retail and food services sales ... and up 4.9 percent ... from April 2025.
+        r"retail and food services sales[\s\S]{0,400}?and up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,180}?from\s+[A-Z][a-z]+\s+\d{4}",
+        # fallback: any nearby 'up X percent from last year'
+        r"up\s+([-+]?\d+(?:\.\d+)?)\s+percent[\s\S]{0,120}?from last year",
+    ]
+
+    yoy_value = None
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            yoy_value = round(float(match.group(1)), 4)
+            break
+
+    if yoy_value is None:
+        raise ValueError("Census retail sales release page에서 YoY 값을 찾지 못했습니다.")
+
+    date_value = datetime.now(KST).date().isoformat()
+    release_match = re.search(r"FOR IMMEDIATE RELEASE:\s*[A-Za-z]+,\s+([A-Z][a-z]+\s+\d{1,2},\s+\d{4})", normalized)
+    if not release_match:
+        release_match = re.search(r"\b([A-Z][a-z]+\s+\d{1,2},\s+\d{4})\b", normalized)
+
+    if release_match:
+        try:
+            date_value = datetime.strptime(release_match.group(1), "%B %d, %Y").date().isoformat()
+        except Exception:
+            pass
+
+    latest = {"date": date_value, "value": yoy_value}
+    previous = {"date": date_value, "value": yoy_value}
+
+    return {
+        "provider": "U.S. Census Retail Sales Release Page Proxy",
+        "series": "Census-retail-sales-yoy-proxy",
+        "url": CENSUS_RETAIL_SALES_PAGE_URL,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": True,
+    }
+
+
+def fetch_bls_monthly_yoy(series_id, label, years_back=5, is_proxy=False):
+    """Fetch a BLS monthly level series and convert it to YoY % growth."""
+    now = datetime.now(KST)
+    start_year = now.year - years_back
+    end_year = now.year
+    url = f"{BLS_PUBLIC_API_URL}{series_id}?startyear={start_year}&endyear={end_year}"
+    text = fetch_text(url, retries=2, timeout=12)
+    payload_json = json.loads(text)
+
+    status = payload_json.get("status")
+    if status not in ("REQUEST_SUCCEEDED", "REQUEST_SUCCEEDED_WITH_ERRORS"):
+        raise ValueError(f"BLS GET API status가 정상 범위가 아닙니다: {status}")
+
+    series_list = payload_json.get("Results", {}).get("series", [])
+    if not series_list:
+        raise ValueError("BLS GET API 응답에 Results.series가 없습니다.")
+
+    level_rows = []
+    for point in series_list[0].get("data", []):
+        year = point.get("year")
+        period = point.get("period")
+        value = point.get("value")
+
+        if not year or not period or not period.startswith("M") or period == "M13":
+            continue
+
+        month = int(period[1:])
+        date = f"{int(year):04d}-{month:02d}-01"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        level_rows.append({"date": date, "value": numeric})
+
+    level_rows.sort(key=lambda row: row["date"])
+
+    yoy_rows = []
+    for index in range(12, len(level_rows)):
+        current = level_rows[index]
+        prior_year = level_rows[index - 12]
+        if prior_year["value"] == 0:
+            continue
+        yoy_value = round((current["value"] / prior_year["value"] - 1) * 100, 4)
+        yoy_rows.append({"date": current["date"], "value": yoy_value})
+
+    latest, previous = latest_two_from_rows(yoy_rows)
+    return {
+        "provider": label,
+        "series": f"{series_id}-YoY",
+        "url": url,
+        "latest": latest,
+        "previous": previous,
+        "isProxy": is_proxy,
+    }
+
 def fetch_fred_monthly_yoy(series_id, years_back=8):
     """Fetch a FRED monthly level series and convert it to YoY % growth.
 
@@ -1669,7 +1810,8 @@ def fetch_fred_monthly_yoy(series_id, years_back=8):
 
 def fetch_retail_sales_yoy_with_fallback():
     providers = [
-        ("FRED RSXFS YoY", lambda: fetch_fred_monthly_yoy("RSXFS", years_back=8)),
+        ("FRED recent RSXFS YoY", lambda: fetch_fred_monthly_yoy("RSXFS", years_back=4)),
+        ("Census Retail Sales Release Page YoY proxy", fetch_census_retail_sales_yoy_proxy),
     ]
 
     return fetch_with_fallback("retail_sales_yoy", providers)
@@ -1677,7 +1819,9 @@ def fetch_retail_sales_yoy_with_fallback():
 
 def fetch_cpi_yoy_with_fallback():
     providers = [
-        ("FRED CPIAUCSL YoY", lambda: fetch_fred_monthly_yoy("CPIAUCSL", years_back=8)),
+        ("FRED recent CPIAUCSL YoY", lambda: fetch_fred_monthly_yoy("CPIAUCSL", years_back=4)),
+        ("BLS CPI-U SA CUSR0000SA0 YoY", lambda: fetch_bls_monthly_yoy(BLS_CPI_SA_SERIES_ID, "BLS CPI-U SA Public Data API", years_back=5, is_proxy=False)),
+        ("BLS CPI-U NSA CUUR0000SA0 YoY proxy", lambda: fetch_bls_monthly_yoy(BLS_CPI_NSA_SERIES_ID, "BLS CPI-U NSA Public Data API Proxy", years_back=5, is_proxy=True)),
     ]
 
     return fetch_with_fallback("cpi_yoy", providers)
@@ -1735,6 +1879,8 @@ def update_retail_sales_yoy(data):
 
     try:
         result = fetch_retail_sales_yoy_with_fallback()
+        is_proxy = bool(result.get("isProxy"))
+        status_note = "proxy-auto-updated" if is_proxy else "auto-updated"
         current_value = result["latest"]["value"]
         previous_value = result["previous"]["value"]
         change = round(current_value - previous_value, 4)
@@ -1752,7 +1898,7 @@ def update_retail_sales_yoy(data):
             interpretation,
             market_reaction,
             action,
-            status_note="auto-updated",
+            status_note=status_note,
         )
         item["unit"] = "%"
 
@@ -1767,7 +1913,7 @@ def update_retail_sales_yoy(data):
             "changePercent": info["changePercent"],
             "date": info["actualDate"],
             "provider": info["provider"],
-            "statusNote": "auto-updated",
+            "statusNote": status_note,
         }
 
     except Exception as error:
@@ -1795,6 +1941,8 @@ def update_cpi_yoy(data):
 
     try:
         result = fetch_cpi_yoy_with_fallback()
+        is_proxy = bool(result.get("isProxy"))
+        status_note = "proxy-auto-updated" if is_proxy else "auto-updated"
         current_value = result["latest"]["value"]
         previous_value = result["previous"]["value"]
         change = round(current_value - previous_value, 4)
@@ -1812,7 +1960,7 @@ def update_cpi_yoy(data):
             interpretation,
             market_reaction,
             action,
-            status_note="auto-updated",
+            status_note=status_note,
         )
         item["unit"] = "%"
 
@@ -1827,7 +1975,7 @@ def update_cpi_yoy(data):
             "changePercent": info["changePercent"],
             "date": info["actualDate"],
             "provider": info["provider"],
-            "statusNote": "auto-updated",
+            "statusNote": status_note,
         }
 
     except Exception as error:
@@ -1867,12 +2015,13 @@ def update_real_retail_sales_proxy(data, retail_update, cpi_update):
         signal, score = real_retail_sales_proxy_signal(current_value, change)
 
         latest_date = max(str(retail_update.get("date", today)), str(cpi_update.get("date", today)))
-        source_note = f"RSXFS YoY {retail_value:.2f}% - CPIAUCSL YoY {cpi_value:.2f}%"
+        source_note = f"Retail Sales YoY {retail_value:.2f}% - CPI YoY {cpi_value:.2f}%"
+        status_note = "proxy-auto-updated" if "proxy" in (retail_update.get("statusNote", "") + cpi_update.get("statusNote", "")) else "auto-updated"
 
         item.update({
-            "source": "Derived from FRED RSXFS YoY and CPIAUCSL YoY",
-            "sourceSeries": "RSXFS-YoY-minus-CPIAUCSL-YoY",
-            "sourceUrl": "https://fred.stlouisfed.org/",
+            "source": "Derived from Retail Sales YoY and CPI YoY",
+            "sourceSeries": "RetailSalesYoY-minus-CPIYoY",
+            "sourceUrl": "https://fred.stlouisfed.org/series/RSXFS",
             "currentValue": current_value,
             "previousValue": previous_value,
             "unit": "%p",
@@ -1885,7 +2034,7 @@ def update_real_retail_sales_proxy(data, retail_update, cpi_update):
             "interpretation": f"Retail Sales - CPI 프록시는 {current_value:.2f}%p입니다. 계산식은 {source_note}입니다. 양수면 명목 소비 증가율이 인플레이션을 이긴 구간입니다.",
             "marketReaction": "이 프록시가 양수면 소비가 물가를 넘어서는 힘을 보인다는 뜻이라 임의소비재와 기업 매출 체력에 우호적입니다. 음수면 소비축은 약해진 것으로 봅니다.",
             "action": "프록시가 음수로 전환되면 소비 민감주 추격 매수를 줄이고, 신용카드 연체율과 고용축을 함께 확인합니다.",
-            "statusNote": "auto-updated",
+            "statusNote": status_note,
         })
 
         print("[update] real_retail_sales_proxy auto-updated", flush=True)
@@ -1899,7 +2048,7 @@ def update_real_retail_sales_proxy(data, retail_update, cpi_update):
             "changePercent": change_percent,
             "date": latest_date,
             "provider": "derived",
-            "statusNote": "auto-updated",
+            "statusNote": status_note,
         }
 
     except Exception as error:
@@ -2083,7 +2232,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial",
-        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-update-v1",
+        "automationStatus": "vix-rates-employment-unrate-dollar-wti-copper-consumption-stable-update-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX fallback 자동 업데이트, 금리 2개 지표, 신규 실업수당 청구건수, 실업률, 달러 지수, WTI, 구리 가격, 소비축 지표 자동 업데이트가 실행되었습니다.",
@@ -2116,7 +2265,7 @@ def assert_no_null(value, path="root"):
 
 
 def main():
-    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption safe auto update", flush=True)
+    print("[start] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption stable auto update", flush=True)
 
     data = load_data()
 
@@ -2135,7 +2284,7 @@ def main():
 
     save_data(data)
 
-    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption safe auto update completed", flush=True)
+    print("[done] VIX + rates + employment + unemployment + dollar/WTI/copper + consumption stable auto update completed", flush=True)
     print("[done] latest.json should contain auto-updated or source-error", flush=True)
 
 
