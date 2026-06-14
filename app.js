@@ -17,6 +17,10 @@ const STATUS_LABELS = {
   negative: "부정",
   warning: "경고",
   "manual-required": "수동 확인",
+  "manual-updated": "수동 반영",
+  "proxy-auto-updated": "프록시 자동",
+  "auto-updated": "자동 업데이트",
+  "auto-pending": "자동 대기",
   "source-error": "소스 오류",
   "not-applicable": "해당 없음"
 };
@@ -73,6 +77,30 @@ const GOLDILOCKS_ZONES = {
   fear_greed_index: "40~65. 극단적 공포도 극단적 탐욕도 아닌 중립~완만한 위험선호 구간."
 };
 
+const MANUAL_STORAGE_KEY = "eightAxisManualOverridesV1";
+
+const MANUAL_REQUIRED_IDS = [
+  "eps_beat_rate",
+  "revenue_beat_rate",
+  "m7_guidance_change",
+  "consensus_revision",
+  "ism_manufacturing_pmi",
+  "pricing_power_mentions",
+  "vix_futures_structure",
+  "fear_greed_index",
+  "credit_card_delinquency"
+];
+
+const MANUAL_SIGNAL_OPTIONS = [
+  { value: "positive", label: "긍정" },
+  { value: "neutral", label: "중립" },
+  { value: "negative", label: "부정" },
+  { value: "warning", label: "경고" }
+];
+
+let APP_RAW_DATA = null;
+let APP_VIEW_DATA = null;
+
 
 function $(id) {
   return document.getElementById(id);
@@ -85,6 +113,72 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+
+function readManualOverrides() {
+  try {
+    const raw = localStorage.getItem(MANUAL_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    console.warn("Manual override load failed", error);
+    return {};
+  }
+}
+
+function writeManualOverrides(overrides) {
+  localStorage.setItem(MANUAL_STORAGE_KEY, JSON.stringify(overrides, null, 2));
+}
+
+function cloneData(data) {
+  return JSON.parse(JSON.stringify(data));
+}
+
+function normalizeManualValue(rawValue) {
+  const trimmed = String(rawValue ?? "").trim();
+  if (!trimmed) return "manual-required";
+  const cleaned = trimmed.replaceAll(",", "");
+  const numeric = Number(cleaned);
+  if (Number.isFinite(numeric) && cleaned !== "") return numeric;
+  return trimmed;
+}
+
+function formatDateForInput(dateLike) {
+  const parsed = dateLike ? new Date(dateLike) : new Date();
+  if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 10);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function applyManualOverrides(rawData) {
+  const data = cloneData(rawData);
+  const overrides = readManualOverrides();
+
+  data.indicators = (data.indicators || []).map(item => {
+    const override = overrides[item.id];
+    if (!override || !override.enabled) return item;
+
+    const updated = { ...item };
+    updated.currentValue = normalizeManualValue(override.rawValue);
+    updated.signal = override.signal || item.signal || "neutral";
+    updated.statusNote = "manual-updated";
+    updated.source = "수동 입력";
+    updated.sourceSeries = "localStorage";
+    updated.updateCycle = "수동 확인";
+    updated.manualNote = override.note || "";
+    updated.manualCheckedAt = override.checkedAt || "";
+    updated.manualUpdatedAt = override.updatedAt || "";
+
+    const note = override.note ? `수동 메모: ${override.note}` : "수동으로 확인된 지표입니다.";
+    updated.interpretation = note;
+    updated.marketReaction = item.marketReaction || "수동 입력 신호를 8축 판단에 반영합니다.";
+    updated.action = item.action || "수동 입력값이 바뀌면 8축 스코어와 시나리오를 다시 확인합니다.";
+
+    return updated;
+  });
+
+  return data;
 }
 
 function labelStatus(status) {
@@ -447,6 +541,137 @@ function injectCurrentValueStyles() {
       border-color: rgba(148, 163, 184, 0.24);
     }
 
+
+
+    .badge.manual-updated {
+      color: #dbeafe;
+      background: rgba(59, 130, 246, 0.16);
+      border-color: rgba(96, 165, 250, 0.38);
+    }
+
+    .manual-panel {
+      margin-bottom: 22px;
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.035));
+      border: 1px solid rgba(255, 255, 255, 0.16);
+    }
+
+    .manual-panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .manual-panel-header h3 {
+      margin: 0 0 6px;
+    }
+
+    .manual-storage-note {
+      margin: 8px 0 16px;
+      color: rgba(255, 255, 255, 0.68);
+      font-size: 0.88rem;
+    }
+
+    .manual-card-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .manual-card {
+      padding: 15px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.13);
+    }
+
+    .manual-card header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .manual-card h4 {
+      margin: 0 0 5px;
+      color: #ffffff;
+    }
+
+    .manual-form-grid {
+      display: grid;
+      grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.7fr) minmax(140px, 0.7fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .manual-note-label {
+      display: block;
+      margin-top: 10px;
+    }
+
+    .manual-form-grid label,
+    .manual-note-label {
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
+    .manual-form-grid label span,
+    .manual-note-label span {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .manual-input {
+      width: 100%;
+      box-sizing: border-box;
+      color: #ffffff;
+      background: rgba(15, 23, 42, 0.68);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 10px;
+      padding: 9px 10px;
+      outline: none;
+      font: inherit;
+    }
+
+    .manual-input:focus {
+      border-color: rgba(96, 165, 250, 0.58);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.14);
+    }
+
+    .manual-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .manual-save,
+    .manual-clear {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: #ffffff;
+      font-weight: 850;
+      cursor: pointer;
+    }
+
+    .manual-save {
+      background: rgba(59, 130, 246, 0.25);
+      border-color: rgba(96, 165, 250, 0.42);
+    }
+
+    .manual-clear {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .todo-section h3 {
+      margin-top: 4px;
+    }
+
     @media (max-width: 640px) {
       .current-value-strong {
         min-width: 88px;
@@ -457,6 +682,17 @@ function injectCurrentValueStyles() {
       .current-value-inline {
         font-size: 0.95rem;
         padding: 2px 6px;
+      }
+
+      .manual-form-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .manual-card header,
+      .manual-panel-header,
+      .manual-actions {
+        align-items: stretch;
+        flex-direction: column;
       }
     }
   `;
@@ -489,6 +725,7 @@ function countSignals(items) {
     error: 0,
     pending: 0,
     automated: 0,
+    manualUpdated: 0,
     total: items.length
   };
 
@@ -497,6 +734,7 @@ function countSignals(items) {
     const signal = item.signal || "neutral";
 
     if (statusNote === "manual-required") counts.manual += 1;
+    if (statusNote === "manual-updated") counts.manualUpdated += 1;
     if (statusNote === "source-error") counts.error += 1;
     if (statusNote === "auto-pending") counts.pending += 1;
     if (statusNote === "auto-updated" || statusNote === "proxy-auto-updated") counts.automated += 1;
@@ -614,6 +852,7 @@ function renderLiveAxisScoreCard(live) {
       <p class="muted">자동 업데이트 ${live.allCounts.automated}개 / 전체 ${live.allCounts.total}개</p>
       <div class="badge-row">
         ${badge("manual-required", `수동 ${live.allCounts.manual}`)}
+        ${badge("manual-updated", `수동 반영 ${live.allCounts.manualUpdated || 0}`)}
         ${badge("source-error", `오류 ${live.allCounts.error}`)}
       </div>
     </article>
@@ -976,25 +1215,176 @@ function renderIndicators(data) {
   list.innerHTML = data.indicators.map(indicatorCard).join("");
 
   const search = $("indicatorSearch");
-  search.addEventListener("input", () => {
-    const query = search.value.trim().toLowerCase();
-    list.querySelectorAll(".indicator-card").forEach(card => {
-      card.classList.toggle("hidden", query && !card.dataset.search.includes(query));
-    });
+  if (search) {
+    search.oninput = () => {
+      const query = search.value.trim().toLowerCase();
+      list.querySelectorAll(".indicator-card").forEach(card => {
+        card.classList.toggle("hidden", query && !card.dataset.search.includes(query));
+      });
+    };
+  }
+}
+
+function isManualTarget(item) {
+  if (!item) return false;
+  return item.statusNote === "manual-required"
+    || item.statusNote === "manual-updated"
+    || MANUAL_REQUIRED_IDS.includes(item.id);
+}
+
+function manualSignalOptionsHtml(selected) {
+  return MANUAL_SIGNAL_OPTIONS.map(option => `
+    <option value="${escapeHtml(option.value)}" ${selected === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+}
+
+function renderManualInputPanel(data) {
+  const overrides = readManualOverrides();
+  const manualItems = (data.indicators || []).filter(isManualTarget);
+
+  if (!manualItems.length) {
+    return `
+      <section class="manual-panel">
+        <div class="manual-panel-header">
+          <div>
+            <h3>수동 확인 지표 입력</h3>
+            <p class="muted">현재 수동 입력 대상 지표가 없습니다.</p>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="manual-panel">
+      <div class="manual-panel-header">
+        <div>
+          <h3>수동 확인 지표 입력 패널</h3>
+          <p class="muted">자동화가 어려운 정성·해석형 지표를 직접 입력하면 8축 스코어와 시나리오 판단에 즉시 반영됩니다.</p>
+        </div>
+        ${badge("manual-updated", "브라우저 저장")}
+      </div>
+      <p class="manual-storage-note">저장 위치: 이 브라우저의 localStorage. 다른 PC·브라우저에는 자동 동기화되지 않습니다.</p>
+      <div class="manual-card-list">
+        ${manualItems.map(item => {
+          const override = overrides[item.id] || {};
+          const rawValue = override.rawValue ?? (item.statusNote === "manual-updated" ? item.currentValue : "");
+          const signal = override.signal || item.signal || "neutral";
+          const note = override.note || item.manualNote || "";
+          const checkedAt = override.checkedAt || item.manualCheckedAt || formatDateForInput(new Date());
+
+          return `
+            <article class="manual-card" data-manual-card="${escapeHtml(item.id)}">
+              <header>
+                <div>
+                  <h4>${escapeHtml(item.name)}</h4>
+                  <p class="muted">${escapeHtml(item.axisName)} · ${escapeHtml(item.timingLabel)} · ID: ${escapeHtml(item.id)}</p>
+                </div>
+                <div class="badge-row">
+                  ${badge(item.signal || "neutral", labelStatus(item.signal))}
+                  ${badge(item.statusNote || "manual-required", labelStatus(item.statusNote))}
+                </div>
+              </header>
+              ${renderGoldilocksZone(item, true)}
+              <div class="manual-form-grid">
+                <label>
+                  <span>현재값 / 요약</span>
+                  <input class="manual-input" data-manual-id="${escapeHtml(item.id)}" data-manual-field="rawValue" value="${escapeHtml(rawValue)}" placeholder="예: 72%, 상향, 콘탱고, 58" />
+                </label>
+                <label>
+                  <span>판정</span>
+                  <select class="manual-input" data-manual-id="${escapeHtml(item.id)}" data-manual-field="signal">
+                    ${manualSignalOptionsHtml(signal)}
+                  </select>
+                </label>
+                <label>
+                  <span>확인일</span>
+                  <input class="manual-input" type="date" data-manual-id="${escapeHtml(item.id)}" data-manual-field="checkedAt" value="${escapeHtml(checkedAt)}" />
+                </label>
+              </div>
+              <label class="manual-note-label">
+                <span>메모</span>
+                <textarea class="manual-input" data-manual-id="${escapeHtml(item.id)}" data-manual-field="note" rows="3" placeholder="근거, 출처, 다음 확인 신호를 적어두세요.">${escapeHtml(note)}</textarea>
+              </label>
+              <div class="manual-actions">
+                <button type="button" class="manual-save" data-manual-action="save" data-manual-id="${escapeHtml(item.id)}">저장 · 8축 반영</button>
+                <button type="button" class="manual-clear" data-manual-action="clear" data-manual-id="${escapeHtml(item.id)}">입력 삭제</button>
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function setupManualInputHandlers() {
+  document.querySelectorAll("[data-manual-action]").forEach(button => {
+    button.onclick = () => {
+      const id = button.dataset.manualId;
+      const action = button.dataset.manualAction;
+      const overrides = readManualOverrides();
+
+      if (action === "clear") {
+        delete overrides[id];
+        writeManualOverrides(overrides);
+        APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
+        renderAll(APP_VIEW_DATA);
+        return;
+      }
+
+      const fields = Array.from(document.querySelectorAll("[data-manual-id]")).filter(field => field.dataset.manualId === id);
+      const next = {
+        enabled: true,
+        rawValue: "",
+        signal: "neutral",
+        checkedAt: formatDateForInput(new Date()),
+        note: "",
+        updatedAt: new Date().toISOString()
+      };
+
+      fields.forEach(field => {
+        const key = field.dataset.manualField;
+        if (!key) return;
+        next[key] = field.value;
+      });
+
+      overrides[id] = next;
+      writeManualOverrides(overrides);
+      APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
+      renderAll(APP_VIEW_DATA);
+    };
   });
 }
 
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
-  $("todoList").innerHTML = todo.items.map(item => `
-    <article class="todo-item">
-      <div>
-        <strong>${escapeHtml(item.label)}</strong>
-        <p class="muted">ID: ${escapeHtml(item.id)}</p>
-      </div>
-      ${item.required ? '<span class="required">필수</span>' : '<span class="muted">선택</span>'}
-    </article>
-  `).join("");
+  $("todoList").innerHTML = `
+    ${renderManualInputPanel(data)}
+    <section class="todo-section">
+      <h3>기본 점검 목록</h3>
+      ${todo.items.map(item => `
+        <article class="todo-item">
+          <div>
+            <strong>${escapeHtml(item.label)}</strong>
+            <p class="muted">ID: ${escapeHtml(item.id)}</p>
+          </div>
+          ${item.required ? '<span class="required">필수</span>' : '<span class="muted">선택</span>'}
+        </article>
+      `).join("")}
+    </section>
+  `;
+  setupManualInputHandlers();
+}
+
+function renderAll(data) {
+  renderMeta(data);
+  renderOverview(data);
+  renderAxes(data);
+  renderTiming(data);
+  renderMatrix(data);
+  renderIndicators(data);
+  renderTodo(data);
 }
 
 function setupTabs() {
@@ -1031,13 +1421,9 @@ async function init() {
       throw new Error("latest.json v1 스키마가 아닙니다. schemaVersion과 indicators를 확인하세요.");
     }
 
-    renderMeta(data);
-    renderOverview(data);
-    renderAxes(data);
-    renderTiming(data);
-    renderMatrix(data);
-    renderIndicators(data);
-    renderTodo(data);
+    APP_RAW_DATA = data;
+    APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
+    renderAll(APP_VIEW_DATA);
   } catch (error) {
     $("dataWarning").textContent = `데이터 로딩 실패: ${error.message}`;
     $("dataWarning").classList.remove("hidden");
