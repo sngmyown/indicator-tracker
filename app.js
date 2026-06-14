@@ -58,12 +58,19 @@ function formatValue(value, unit = "") {
 
 function currentValueStatusClass(item) {
   const status = item?.statusNote || "";
+  const signal = item?.signal || "";
 
-  if (status === "auto-updated") return "value-live";
-  if (status === "proxy-auto-updated") return "value-live";
   if (status === "source-error") return "value-error";
   if (status === "auto-pending") return "value-pending";
   if (status === "manual-required") return "value-manual";
+
+  if (signal === "positive") return "value-signal-positive";
+  if (signal === "negative") return "value-signal-negative";
+  if (signal === "neutral") return "value-signal-neutral";
+  if (signal === "warning") return "value-signal-warning";
+
+  if (status === "auto-updated") return "value-live";
+  if (status === "proxy-auto-updated") return "value-live";
 
   return "value-default";
 }
@@ -106,6 +113,42 @@ function injectCurrentValueStyles() {
       color: #ffffff;
       background: rgba(255, 255, 255, 0.16);
       border-color: rgba(255, 255, 255, 0.28);
+    }
+
+    .current-value-strong.value-signal-positive {
+      color: #d8ffe4;
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.28), rgba(34, 197, 94, 0.10));
+      border-color: rgba(34, 197, 94, 0.48);
+      box-shadow:
+        0 0 0 1px rgba(187, 247, 208, 0.10) inset,
+        0 10px 26px rgba(0, 0, 0, 0.18),
+        0 0 18px rgba(34, 197, 94, 0.12);
+    }
+
+    .current-value-strong.value-signal-neutral {
+      color: #ffffff;
+      background: linear-gradient(135deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.08));
+      border-color: rgba(203, 213, 225, 0.35);
+    }
+
+    .current-value-strong.value-signal-negative {
+      color: #ffe1e1;
+      background: linear-gradient(135deg, rgba(239, 68, 68, 0.30), rgba(239, 68, 68, 0.10));
+      border-color: rgba(248, 113, 113, 0.50);
+      box-shadow:
+        0 0 0 1px rgba(254, 202, 202, 0.10) inset,
+        0 10px 26px rgba(0, 0, 0, 0.18),
+        0 0 18px rgba(239, 68, 68, 0.12);
+    }
+
+    .current-value-strong.value-signal-warning {
+      color: #fff2c2;
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.30), rgba(245, 158, 11, 0.10));
+      border-color: rgba(251, 191, 36, 0.50);
+      box-shadow:
+        0 0 0 1px rgba(254, 243, 199, 0.10) inset,
+        0 10px 26px rgba(0, 0, 0, 0.18),
+        0 0 18px rgba(245, 158, 11, 0.12);
     }
 
     .current-value-strong.value-pending {
