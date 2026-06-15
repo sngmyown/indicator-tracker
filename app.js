@@ -81,15 +81,39 @@ const GOLDILOCKS_ZONES = {
 const MANUAL_STORAGE_KEY = "eightAxisManualOverridesV1";
 
 const MANUAL_REQUIRED_IDS = [
-  "eps_beat_rate",
-  "revenue_beat_rate",
   "m7_guidance_change",
   "consensus_revision",
-  "ism_manufacturing_pmi",
   "pricing_power_mentions",
+  "fear_greed_index"
+];
+
+const AUTOMATED_TODO_IDS = new Set([
+  "eps_beat_rate",
+  "revenue_beat_rate",
+  "ism_manufacturing_pmi",
+  "credit_card_delinquency",
   "vix_futures_structure",
-  "fear_greed_index",
-  "credit_card_delinquency"
+  "sp500_eps_beat_rate",
+  "sp500_revenue_beat_rate",
+  "s_and_p_500_eps_beat_rate",
+  "s_and_p_500_revenue_beat_rate"
+]);
+
+const AUTOMATED_TODO_KEYWORDS = [
+  "S&P 500 EPS",
+  "EPS Beat",
+  "S&P500 EPS",
+  "S&P 500 Revenue",
+  "Revenue Beat",
+  "S&P500 Revenue",
+  "ISM Manufacturing",
+  "ISM 제조업",
+  "ISM PMI",
+  "신용카드 연체율",
+  "Credit Card Delinquency",
+  "VIX 선물 구조",
+  "VIX Futures Structure",
+  "VIX Term Structure"
 ];
 
 const MANUAL_SIGNAL_OPTIONS = [
@@ -1411,8 +1435,16 @@ function renderIndicators(data) {
   }
 }
 
+function isAutomatedTodoItem(item) {
+  if (!item) return false;
+  const id = String(item.id || "");
+  const text = [item.id, item.label, item.name, item.title, item.summary, item.description].filter(Boolean).join(" ");
+  return AUTOMATED_TODO_IDS.has(id) || AUTOMATED_TODO_KEYWORDS.some(keyword => text.includes(keyword));
+}
+
 function isManualTarget(item) {
   if (!item) return false;
+  if (isAutomatedTodoItem(item)) return false;
   return item.statusNote === "manual-required"
     || item.statusNote === "manual-updated"
     || MANUAL_REQUIRED_IDS.includes(item.id);
@@ -1545,11 +1577,12 @@ function setupManualInputHandlers() {
 
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
+  const visibleTodoItems = (todo.items || []).filter(item => !isAutomatedTodoItem(item));
   $("todoList").innerHTML = `
     ${renderManualInputPanel(data)}
     <section class="todo-section">
       <h3>기본 점검 목록</h3>
-      ${todo.items.map(item => `
+      ${visibleTodoItems.map(item => `
         <article class="todo-item">
           <div>
             <strong>${escapeHtml(item.label)}</strong>
