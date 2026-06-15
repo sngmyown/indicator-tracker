@@ -4085,6 +4085,77 @@ def update_unautomated_manual_notes(data):
             "action": item.get("action") or "주간 리서치 루틴에서 직접 확인하고, 추후 안정적인 데이터 소스가 생기면 자동화합니다.",
         })
 
+
+def cleanup_automated_todo_items(data):
+    """Remove To do entries for indicators that are now automated.
+
+    These indicators used to be manual-required, but they now have automated or proxy-automated update paths.
+    Keeping them in the To do list creates a false weekly workload.
+    """
+    automated_todo_ids = {
+        "eps_beat_rate",
+        "revenue_beat_rate",
+        "sp500_eps_beat_rate",
+        "sp500_revenue_beat_rate",
+        "ism_manufacturing_pmi",
+        "ism_manufacturing_pmi_headline",
+        "credit_card_delinquency",
+        "vix_futures_structure",
+        "vix_term_structure",
+    }
+
+    automated_label_keywords = [
+        "S&P 500 EPS",
+        "EPS Beat",
+        "S&P 500 Revenue",
+        "Revenue Beat",
+        "ISM Manufacturing",
+        "ISM 제조업",
+        "Manufacturing PMI",
+        "신용카드 연체율",
+        "Credit Card Delinquency",
+        "VIX 선물 구조",
+        "VIX Futures",
+        "콘탱고",
+        "백워데이션",
+    ]
+
+    todo = data.get("todo")
+    if not isinstance(todo, dict):
+        return
+
+    items = todo.get("items")
+    if not isinstance(items, list):
+        return
+
+    cleaned = []
+    removed = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            cleaned.append(item)
+            continue
+
+        item_id = str(item.get("id", ""))
+        label = str(item.get("label", ""))
+        text_blob = f"{item_id} {label}"
+
+        should_remove = item_id in automated_todo_ids or any(keyword in text_blob for keyword in automated_label_keywords)
+
+        if should_remove:
+            removed.append(item_id or label or "unknown")
+        else:
+            cleaned.append(item)
+
+    todo["items"] = cleaned
+
+    if removed:
+        todo["updatedAt"] = datetime.now(KST).isoformat(timespec="seconds")
+        todo["note"] = "자동화가 완료된 지표는 To do 목록에서 제거했습니다. 남은 항목은 주간 시나리오·포트폴리오 판단 또는 진짜 수동 해석 지표입니다."
+        print(f"[todo-cleanup] removed automated todo items: {removed}", flush=True)
+    else:
+        print("[todo-cleanup] no automated todo items found", flush=True)
+
 def update_meta(data):
     now = datetime.now(KST)
 
@@ -4094,7 +4165,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-history-v1",
+        "automationStatus": "full-auto-broad-indicators-history-todo-cleanup-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -4105,7 +4176,7 @@ def update_meta(data):
             "추가 소비 지표: 신용카드 연체율.",
             "마진 축: PPI YoY, 임금 비용 YoY, CPI-PPI 가격전가 프록시.",
             "추가 원자재 지표: 금 가격 프록시.",
-            "EPS/Revenue Beat Rate, ISM Manufacturing PMI, 신용카드 연체율은 자동화 대상으로 전환했습니다. M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
+            "EPS/Revenue Beat Rate, ISM Manufacturing PMI, 신용카드 연체율, VIX 선물 구조는 자동화 대상으로 전환했고 To do 목록에서도 제거합니다. M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "VIX 선물 구조는 ^VW1VX/^VW2VX 또는 ^VFTW1/^VFTW2로 계산하며, (VX2 - VX1) / VX1 × 100이 양수면 콘탱고, 음수면 백워데이션으로 표시합니다.",
         ],
@@ -4352,6 +4423,7 @@ def main():
     update_all_remaining_auto_indicators(data)
     update_newly_automated_indicators(data)
     update_unautomated_manual_notes(data)
+    cleanup_automated_todo_items(data)
     update_meta(data)
 
     assert_no_null(data)
@@ -4360,7 +4432,7 @@ def main():
     update_history(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-history-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-history-todo-cleanup-v1", flush=True)
 
 
 if __name__ == "__main__":
