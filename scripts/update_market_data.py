@@ -13,8 +13,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 DATA_PATH = Path("data/latest.json")
-HISTORY_PATH = Path("data/history.json")
-HISTORY_MAX_SNAPSHOTS = 80
 KST = ZoneInfo("Asia/Seoul")
 
 FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
@@ -2344,10 +2342,14 @@ def fetch_average_hourly_earnings_yoy_with_fallback():
 
 
 def fetch_ppi_yoy_with_fallback():
+    # 중요: ppi_yoy는 시장에서 말하는 headline PPI, 즉 Final Demand PPI YoY로 맞춘다.
+    # 이전 버전은 PPIACO(All Commodities)를 먼저 사용해 에너지/원자재 급등 시
+    # BLS headline final demand PPI보다 과도하게 큰 값이 표시될 수 있었다.
+    # 따라서 PPIACO는 제거하고 WPUFD4/PPIFIS Final Demand 계열만 사용한다.
     providers = [
-        ("FRED PPIACO YoY", lambda: fetch_fred_monthly_yoy("PPIACO", years_back=8)),
-        ("BLS WPU00000000 All Commodities PPI YoY", lambda: fetch_bls_monthly_yoy(BLS_PPI_ALL_COMMODITIES_SERIES_ID, "BLS PPI All Commodities", years_back=8, is_proxy=False)),
-        ("BLS WPUFD4 Final Demand PPI YoY proxy", lambda: fetch_bls_monthly_yoy(BLS_PPI_FINAL_DEMAND_SERIES_ID, "BLS PPI Final Demand Proxy", years_back=8, is_proxy=True)),
+        ("FRED WPUFD4 Final Demand PPI YoY", lambda: fetch_fred_monthly_yoy("WPUFD4", years_back=8)),
+        ("BLS WPUFD4 Final Demand PPI YoY", lambda: fetch_bls_monthly_yoy(BLS_PPI_FINAL_DEMAND_SERIES_ID, "BLS PPI Final Demand", years_back=8, is_proxy=False)),
+        ("FRED PPIFIS Final Demand PPI YoY fallback", lambda: fetch_fred_monthly_yoy("PPIFIS", years_back=8)),
     ]
     return fetch_with_fallback("ppi_yoy", providers)
 
@@ -3542,8 +3544,8 @@ def update_cpi_ppi_pass_through(data):
     change = round(current - previous, 4) if is_number(previous) else 0
     signal, score = pass_through_signal(current)
     item.update({
-        "source": "Derived from CPIAUCSL-YoY and PPIACO-YoY",
-        "sourceSeries": "CPIAUCSL-YoY-minus-PPIACO-YoY",
+        "source": "Derived from CPIAUCSL-YoY and Final Demand PPI YoY",
+        "sourceSeries": "CPIAUCSL-YoY-minus-WPUFD4-YoY",
         "sourceUrl": find_indicator(data, "cpi_yoy").get("sourceUrl", "derived"),
         "currentValue": current,
         "previousValue": previous,
@@ -4085,77 +4087,6 @@ def update_unautomated_manual_notes(data):
             "action": item.get("action") or "주간 리서치 루틴에서 직접 확인하고, 추후 안정적인 데이터 소스가 생기면 자동화합니다.",
         })
 
-
-def cleanup_automated_todo_items(data):
-    """Remove To do entries for indicators that are now automated.
-
-    These indicators used to be manual-required, but they now have automated or proxy-automated update paths.
-    Keeping them in the To do list creates a false weekly workload.
-    """
-    automated_todo_ids = {
-        "eps_beat_rate",
-        "revenue_beat_rate",
-        "sp500_eps_beat_rate",
-        "sp500_revenue_beat_rate",
-        "ism_manufacturing_pmi",
-        "ism_manufacturing_pmi_headline",
-        "credit_card_delinquency",
-        "vix_futures_structure",
-        "vix_term_structure",
-    }
-
-    automated_label_keywords = [
-        "S&P 500 EPS",
-        "EPS Beat",
-        "S&P 500 Revenue",
-        "Revenue Beat",
-        "ISM Manufacturing",
-        "ISM 제조업",
-        "Manufacturing PMI",
-        "신용카드 연체율",
-        "Credit Card Delinquency",
-        "VIX 선물 구조",
-        "VIX Futures",
-        "콘탱고",
-        "백워데이션",
-    ]
-
-    todo = data.get("todo")
-    if not isinstance(todo, dict):
-        return
-
-    items = todo.get("items")
-    if not isinstance(items, list):
-        return
-
-    cleaned = []
-    removed = []
-
-    for item in items:
-        if not isinstance(item, dict):
-            cleaned.append(item)
-            continue
-
-        item_id = str(item.get("id", ""))
-        label = str(item.get("label", ""))
-        text_blob = f"{item_id} {label}"
-
-        should_remove = item_id in automated_todo_ids or any(keyword in text_blob for keyword in automated_label_keywords)
-
-        if should_remove:
-            removed.append(item_id or label or "unknown")
-        else:
-            cleaned.append(item)
-
-    todo["items"] = cleaned
-
-    if removed:
-        todo["updatedAt"] = datetime.now(KST).isoformat(timespec="seconds")
-        todo["note"] = "자동화가 완료된 지표는 To do 목록에서 제거했습니다. 남은 항목은 주간 시나리오·포트폴리오 판단 또는 진짜 수동 해석 지표입니다."
-        print(f"[todo-cleanup] removed automated todo items: {removed}", flush=True)
-    else:
-        print("[todo-cleanup] no automated todo items found", flush=True)
-
 def update_meta(data):
     now = datetime.now(KST)
 
@@ -4165,7 +4096,7 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-history-todo-cleanup-v1",
+        "automationStatus": "full-auto-broad-indicators-ppi-final-demand-fix-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
@@ -4176,220 +4107,11 @@ def update_meta(data):
             "추가 소비 지표: 신용카드 연체율.",
             "마진 축: PPI YoY, 임금 비용 YoY, CPI-PPI 가격전가 프록시.",
             "추가 원자재 지표: 금 가격 프록시.",
-            "EPS/Revenue Beat Rate, ISM Manufacturing PMI, 신용카드 연체율, VIX 선물 구조는 자동화 대상으로 전환했고 To do 목록에서도 제거합니다. M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
+            "EPS/Revenue Beat Rate, ISM Manufacturing PMI, 신용카드 연체율은 자동화 대상으로 전환했습니다. M7 가이던스, 컨센서스 리비전, pricing power 멘트, Fear & Greed Index는 현재 수동 확인 대상으로 남깁니다.",
             "성공 시 auto-updated, 프록시 성공 시 proxy-auto-updated, 모든 소스 실패 시 source-error로 표시됩니다. 단, 직전 정상 숫자가 있으면 일시적 소스 실패가 나도 currentValue 숫자는 보존합니다.",
             "VIX 선물 구조는 ^VW1VX/^VW2VX 또는 ^VFTW1/^VFTW2로 계산하며, (VX2 - VX1) / VX1 × 100이 양수면 콘탱고, 음수면 백워데이션으로 표시합니다.",
         ],
     })
-
-
-def safe_signal_status(value):
-    if value in {"positive", "neutral", "negative", "warning", "manual-required", "manual-updated", "source-error", "auto-pending"}:
-        return value
-    return "neutral"
-
-
-def compute_history_axis_counts(data):
-    axis_summary = data.get("axisSummary", {}) or {}
-    counts = {
-        "positive": 0,
-        "neutral": 0,
-        "negative": 0,
-        "warning": 0,
-        "manual": 0,
-        "total": 0,
-    }
-
-    for axis_id, axis in axis_summary.items():
-        status = axis.get("status", "neutral")
-        counts["total"] += 1
-        if status == "positive":
-            counts["positive"] += 1
-        elif status == "negative":
-            counts["negative"] += 1
-        elif status == "warning":
-            counts["warning"] += 1
-        elif status in {"manual-required", "manual-updated", "source-error", "auto-pending"}:
-            counts["manual"] += 1
-        else:
-            counts["neutral"] += 1
-
-    return counts
-
-
-def compute_history_regime(axis_counts):
-    positive = axis_counts.get("positive", 0)
-    negative = axis_counts.get("negative", 0) + axis_counts.get("warning", 0)
-
-    if positive >= 4 and negative <= 2:
-        return {
-            "marketRegime": "위험자산 우호 / 강세 가능성",
-            "riskMode": "positive",
-            "actionBias": "우위 섹터 중심 분할 진입",
-            "cashGuide": "현금 20~30% 유지. 단, 과열 신호가 커지면 추격 매수 제한.",
-        }
-
-    if negative >= 4:
-        return {
-            "marketRegime": "방어 우선 / 약세 가능성",
-            "riskMode": "negative",
-            "actionBias": "비중 축소 + 현금 방어",
-            "cashGuide": "현금 45~60% 이상 검토. 신규 진입은 상대강도 높은 섹터로 제한.",
-        }
-
-    return {
-        "marketRegime": "혼조 / 변동성 장세",
-        "riskMode": "neutral",
-        "actionBias": "선별 진입 + 현금 유지",
-        "cashGuide": "현금 30~45% 유지. 긍정 축과 부정 축이 충돌하므로 분할 대응.",
-    }
-
-
-def indicator_snapshot(item):
-    return {
-        "id": item.get("id", "unknown"),
-        "name": item.get("name", item.get("id", "unknown")),
-        "axis": item.get("axis", "unknown"),
-        "axisName": item.get("axisName", item.get("axis", "unknown")),
-        "timing": item.get("timing", "unknown"),
-        "currentValue": item.get("currentValue"),
-        "unit": item.get("unit", ""),
-        "signal": item.get("signal", "neutral"),
-        "score": item.get("score", 0),
-        "statusNote": item.get("statusNote", "unknown"),
-        "sourceSeries": item.get("sourceSeries", "unknown"),
-    }
-
-
-def build_history_snapshot(data):
-    now = datetime.now(KST)
-    meta = data.get("meta", {}) or {}
-    axis_counts = compute_history_axis_counts(data)
-    regime = compute_history_regime(axis_counts)
-
-    key_ids = [
-        "vix",
-        "vix_futures_structure",
-        "us_2y_yield",
-        "us_10y_yield",
-        "ten_two_spread",
-        "real_10y_yield",
-        "fed_funds_rate",
-        "initial_claims",
-        "unemployment_rate",
-        "nonfarm_payrolls",
-        "average_hourly_earnings",
-        "ism_manufacturing_pmi",
-        "retail_sales_yoy",
-        "cpi_yoy",
-        "real_retail_sales_proxy",
-        "credit_card_delinquency",
-        "dollar_index_proxy",
-        "wti_oil",
-        "copper_price",
-        "gold_price_proxy",
-        "ppi_yoy",
-        "wage_cost_yoy",
-        "cpi_ppi_pass_through",
-        "spy_flow_proxy",
-        "qqq_flow_proxy",
-        "iwm_flow_proxy",
-        "sqqq_flow_proxy",
-        "eps_beat_rate",
-        "revenue_beat_rate",
-    ]
-
-    indicator_map = {item.get("id"): item for item in data.get("indicators", [])}
-    key_indicators = [indicator_snapshot(indicator_map[indicator_id]) for indicator_id in key_ids if indicator_id in indicator_map]
-
-    return {
-        "snapshotId": now.strftime("%Y%m%d-%H%M%S-KST"),
-        "date": now.date().isoformat(),
-        "week": meta.get("week") or f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
-        "updatedAt": meta.get("updatedAt") or now.isoformat(timespec="seconds"),
-        "automationStatus": meta.get("automationStatus", "unknown"),
-        "axisCounts": axis_counts,
-        "marketRegime": regime["marketRegime"],
-        "riskMode": regime["riskMode"],
-        "actionBias": regime["actionBias"],
-        "cashGuide": regime["cashGuide"],
-        "axisSummary": data.get("axisSummary", {}),
-        "keyIndicators": key_indicators,
-    }
-
-
-def load_history():
-    if not HISTORY_PATH.exists():
-        return {
-            "schemaVersion": "1.0.0",
-            "meta": {
-                "createdAt": datetime.now(KST).isoformat(timespec="seconds"),
-                "timezone": "Asia/Seoul",
-                "maxSnapshots": HISTORY_MAX_SNAPSHOTS,
-                "mode": "append-snapshot",
-            },
-            "snapshots": [],
-        }
-
-    try:
-        with HISTORY_PATH.open("r", encoding="utf-8") as file:
-            history = json.load(file)
-    except Exception as exc:
-        print(f"[history] existing history.json could not be parsed, recreating: {exc}", flush=True)
-        history = {"schemaVersion": "1.0.0", "meta": {}, "snapshots": []}
-
-    if not isinstance(history, dict):
-        history = {"schemaVersion": "1.0.0", "meta": {}, "snapshots": []}
-
-    history.setdefault("schemaVersion", "1.0.0")
-    history.setdefault("meta", {})
-    history.setdefault("snapshots", [])
-    if not isinstance(history["snapshots"], list):
-        history["snapshots"] = []
-
-    return history
-
-
-def save_history(history):
-    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    HISTORY_PATH.write_text(
-        json.dumps(history, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-
-def update_history(data):
-    history = load_history()
-    snapshot = build_history_snapshot(data)
-
-    snapshots = history.get("snapshots", [])
-    snapshots.append(snapshot)
-
-    # 중복 실행으로 같은 updatedAt 스냅샷이 여러 번 생기는 경우 마지막 것만 보존합니다.
-    deduped = {}
-    order = []
-    for item in snapshots:
-        key = item.get("updatedAt") or item.get("snapshotId")
-        if key not in deduped:
-            order.append(key)
-        deduped[key] = item
-
-    snapshots = [deduped[key] for key in order][-HISTORY_MAX_SNAPSHOTS:]
-
-    history["snapshots"] = snapshots
-    history.setdefault("meta", {})
-    history["meta"].update({
-        "updatedAt": datetime.now(KST).isoformat(timespec="seconds"),
-        "timezone": "Asia/Seoul",
-        "maxSnapshots": HISTORY_MAX_SNAPSHOTS,
-        "snapshotCount": len(snapshots),
-        "latestSnapshotId": snapshot["snapshotId"],
-        "mode": "append-snapshot",
-        "notes": "각 자동 업데이트 실행 후 8축 스코어와 핵심 지표 스냅샷을 누적합니다.",
-    })
-
-    save_history(history)
-    print(f"[history] appended snapshot {snapshot['snapshotId']} / total {len(snapshots)}", flush=True)
 
 def assert_no_null(value, path="root"):
     if value is None:
@@ -4423,16 +4145,14 @@ def main():
     update_all_remaining_auto_indicators(data)
     update_newly_automated_indicators(data)
     update_unautomated_manual_notes(data)
-    cleanup_automated_todo_items(data)
     update_meta(data)
 
     assert_no_null(data)
 
     save_data(data)
-    update_history(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-history-todo-cleanup-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-ppi-final-demand-fix-v1", flush=True)
 
 
 if __name__ == "__main__":
