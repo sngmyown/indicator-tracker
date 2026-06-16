@@ -803,7 +803,9 @@ function injectCurrentValueStyles() {
     .review-save,
     .review-delete,
     .portfolio-save,
+    .portfolio-cancel,
     .portfolio-clear,
+    .portfolio-edit,
     .portfolio-delete {
       border: 1px solid rgba(255, 255, 255, 0.18);
       border-radius: 999px;
@@ -820,11 +822,41 @@ function injectCurrentValueStyles() {
       border-color: rgba(96, 165, 250, 0.42);
     }
 
+    .portfolio-edit,
+    .portfolio-cancel {
+      background: rgba(245, 158, 11, 0.16);
+      border-color: rgba(251, 191, 36, 0.34);
+    }
+
     .review-delete,
     .portfolio-clear,
     .portfolio-delete {
       background: rgba(239, 68, 68, 0.13);
       border-color: rgba(248, 113, 113, 0.30);
+    }
+
+    .portfolio-row-actions {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .portfolio-editing-note {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(245, 158, 11, 0.11);
+      border: 1px solid rgba(251, 191, 36, 0.22);
+      color: #fde68a;
+      font-size: 0.84rem;
+      font-weight: 800;
+      display: none;
+    }
+
+    .portfolio-editing-note.is-active {
+      display: block;
     }
 
     .review-calendar-card select,
@@ -2165,7 +2197,10 @@ function renderPortfolioPanel() {
       <span class="portfolio-row-logo">${renderLogoElement(item, "portfolio-row-logo").replace('class="portfolio-row-logo"', 'class="portfolio-row-logo-inner"')}</span>
       <span class="portfolio-row-name"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.symbol || "-")} · ${escapeHtml(item.type)}</span></span>
       <span class="portfolio-row-amount">${formatCurrency(item.amount)}</span>
-      <button type="button" class="portfolio-delete" data-portfolio-delete="${escapeHtml(item.id)}">삭제</button>
+      <span class="portfolio-row-actions">
+        <button type="button" class="portfolio-edit" data-portfolio-edit="${escapeHtml(item.id)}">수정</button>
+        <button type="button" class="portfolio-delete" data-portfolio-delete="${escapeHtml(item.id)}">삭제</button>
+      </span>
     </div>
   `).join("") : `<p class="muted">아직 입력된 자산이 없습니다. 현금은 symbol을 CASH로 입력하면 현금 비중으로 분류됩니다.</p>`;
 
@@ -2174,11 +2209,13 @@ function renderPortfolioPanel() {
       <div class="manual-panel-header">
         <div>
           <h3>포트폴리오 현금·자산 비중 점검</h3>
-          <p class="muted">금액을 입력하면 자산별 비중과 현금 비중을 파이 차트로 확인합니다. 조각에 마우스를 올리면 로고, 금액, 비중이 표시됩니다.</p>
+          <p class="muted">금액을 입력하면 자산별 비중과 현금 비중을 파이 차트로 확인합니다. 조각에 마우스를 올리면 로고, 금액, 비중이 표시됩니다. 보유 자산의 비중을 줄이거나 늘릴 때는 행의 <strong>수정</strong>을 눌러 금액만 바꾸면 됩니다.</p>
         </div>
         ${badge("manual-updated", "브라우저 저장")}
       </div>
       ${renderPortfolioChart()}
+      <input type="hidden" id="portfolioEditId" value="" />
+      <div class="portfolio-editing-note" id="portfolioEditingNote">편집 모드입니다. 금액·분류·로고 등을 수정한 뒤 <strong>수정 저장</strong>을 누르세요.</div>
       <div class="portfolio-form-grid">
         <label><span>자산명</span><input class="manual-input" id="portfolioName" placeholder="예: NVIDIA, 현금, QQQ" /></label>
         <label><span>티커 / 심볼</span><input class="manual-input" id="portfolioSymbol" placeholder="예: NVDA, CASH, QQQ" /></label>
@@ -2188,6 +2225,7 @@ function renderPortfolioPanel() {
       </div>
       <div class="portfolio-actions">
         <button type="button" class="portfolio-save" id="addPortfolioHolding">자산 추가 / 저장</button>
+        <button type="button" class="portfolio-cancel" id="cancelPortfolioEdit" style="display:none;">편집 취소</button>
         <button type="button" class="portfolio-clear" id="clearPortfolioHoldings">전체 삭제</button>
       </div>
       <div class="portfolio-row-list" style="margin-top: 12px;">${rows}</div>
@@ -2195,34 +2233,98 @@ function renderPortfolioPanel() {
   `;
 }
 
+function portfolioFormPayload() {
+  const name = $("portfolioName")?.value.trim() || "자산";
+  const symbol = $("portfolioSymbol")?.value.trim().toUpperCase() || "";
+  const type = $("portfolioType")?.value.trim() || (symbol === "CASH" || name.includes("현금") ? "현금" : "주식/ETF");
+  const amount = Number(String($("portfolioAmount")?.value || "0").replaceAll(",", ""));
+  const logoUrl = $("portfolioLogo")?.value.trim() || "";
+  return { name, symbol, type, amount, logoUrl };
+}
+
+function clearPortfolioForm() {
+  ["portfolioName", "portfolioSymbol", "portfolioType", "portfolioAmount", "portfolioLogo"].forEach(id => {
+    const el = $(id);
+    if (el) el.value = "";
+  });
+  const edit = $("portfolioEditId");
+  if (edit) edit.value = "";
+  const save = $("addPortfolioHolding");
+  if (save) save.textContent = "자산 추가 / 저장";
+  const cancel = $("cancelPortfolioEdit");
+  if (cancel) cancel.style.display = "none";
+  const note = $("portfolioEditingNote");
+  if (note) note.classList.remove("is-active");
+}
+
+function enterPortfolioEditMode(item) {
+  if (!item) return;
+  const edit = $("portfolioEditId");
+  if (edit) edit.value = item.id;
+  const name = $("portfolioName");
+  const symbol = $("portfolioSymbol");
+  const type = $("portfolioType");
+  const amount = $("portfolioAmount");
+  const logo = $("portfolioLogo");
+  if (name) name.value = item.name || "";
+  if (symbol) symbol.value = item.symbol || "";
+  if (type) type.value = item.type || "";
+  if (amount) amount.value = String(item.amount || "");
+  if (logo) logo.value = item.logoUrl || "";
+  const save = $("addPortfolioHolding");
+  if (save) save.textContent = "수정 저장";
+  const cancel = $("cancelPortfolioEdit");
+  if (cancel) cancel.style.display = "inline-flex";
+  const note = $("portfolioEditingNote");
+  if (note) note.classList.add("is-active");
+  name?.focus();
+  $("portfolioName")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
 function setupPortfolioHandlers() {
   const add = $("addPortfolioHolding");
   const clear = $("clearPortfolioHoldings");
+  const cancelEdit = $("cancelPortfolioEdit");
   if (add) {
     add.onclick = () => {
-      const name = $("portfolioName")?.value.trim() || "자산";
-      const symbol = $("portfolioSymbol")?.value.trim().toUpperCase() || "";
-      const type = $("portfolioType")?.value.trim() || (symbol === "CASH" || name.includes("현금") ? "현금" : "주식/ETF");
-      const amount = Number(String($("portfolioAmount")?.value || "0").replaceAll(",", ""));
-      const logoUrl = $("portfolioLogo")?.value.trim() || "";
-      if (!Number.isFinite(amount) || amount <= 0) return;
+      const payload = portfolioFormPayload();
+      if (!Number.isFinite(payload.amount) || payload.amount <= 0) return;
+      const editId = $("portfolioEditId")?.value || "";
       const holdings = readPortfolioHoldings();
-      holdings.push({ id: `asset-${Date.now()}`, name, symbol, type, amount, logoUrl });
-      writePortfolioHoldings(holdings);
+      if (editId) {
+        const next = holdings.map(item => item.id === editId ? { ...item, ...payload, id: editId } : item);
+        writePortfolioHoldings(next);
+      } else {
+        holdings.push({ id: `asset-${Date.now()}`, ...payload });
+        writePortfolioHoldings(holdings);
+      }
+      clearPortfolioForm();
       renderAll(APP_VIEW_DATA);
     };
+  }
+  if (cancelEdit) {
+    cancelEdit.onclick = () => clearPortfolioForm();
   }
   if (clear) {
     clear.onclick = () => {
       if (!confirm("포트폴리오 입력값을 모두 삭제할까요?")) return;
       writePortfolioHoldings([]);
+      clearPortfolioForm();
       renderAll(APP_VIEW_DATA);
     };
   }
+  document.querySelectorAll("[data-portfolio-edit]").forEach(button => {
+    button.onclick = () => {
+      const id = button.dataset.portfolioEdit;
+      const item = readPortfolioHoldings().find(entry => entry.id === id);
+      enterPortfolioEditMode(item);
+    };
+  });
   document.querySelectorAll("[data-portfolio-delete]").forEach(button => {
     button.onclick = () => {
       const id = button.dataset.portfolioDelete;
       writePortfolioHoldings(readPortfolioHoldings().filter(item => item.id !== id));
+      if ($("portfolioEditId")?.value === id) clearPortfolioForm();
       renderAll(APP_VIEW_DATA);
     };
   });
