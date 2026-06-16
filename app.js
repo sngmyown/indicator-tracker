@@ -2252,6 +2252,255 @@ function setupPortfolioHoverHandlers() {
   });
 }
 
+
+
+const BACKUP_FILE_VERSION = "eight-axis-market-dashboard-backup-v1";
+
+function localDataSummary() {
+  const manualOverrides = readManualOverrides();
+  const weeklyReviews = readWeeklyReviews();
+  const portfolioHoldings = readPortfolioHoldings();
+  return {
+    manualCount: Object.keys(manualOverrides || {}).length,
+    reviewCount: weeklyReviews.length,
+    portfolioCount: portfolioHoldings.length
+  };
+}
+
+function backupDateStamp() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function buildBackupPayload(scope = "full") {
+  const manualOverrides = readManualOverrides();
+  const weeklyReviews = readWeeklyReviews();
+  const portfolioHoldings = readPortfolioHoldings();
+
+  const data = {};
+  if (scope === "full" || scope === "manual") {
+    data.manualOverrides = manualOverrides;
+    data.weeklyReviews = weeklyReviews;
+  }
+  if (scope === "full" || scope === "portfolio") {
+    data.portfolioHoldings = portfolioHoldings;
+  }
+
+  return {
+    type: BACKUP_FILE_VERSION,
+    version: 1,
+    scope,
+    exportedAt: new Date().toISOString(),
+    source: "eight-axis-market-dashboard-localStorage",
+    data
+  };
+}
+
+function downloadJsonFile(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportBackup(scope) {
+  const payload = buildBackupPayload(scope);
+  const label = scope === "portfolio" ? "portfolio" : scope === "manual" ? "manual-review" : "full";
+  downloadJsonFile(`market-dashboard-${label}-backup-${backupDateStamp()}.json`, payload);
+}
+
+function restoreBackupPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("백업 파일 형식이 올바르지 않습니다.");
+  }
+
+  const data = payload.data && typeof payload.data === "object" ? payload.data : payload;
+  let restored = [];
+
+  if (data.manualOverrides && typeof data.manualOverrides === "object" && !Array.isArray(data.manualOverrides)) {
+    writeManualOverrides(data.manualOverrides);
+    restored.push("수동 지표 입력값");
+  }
+
+  if (Array.isArray(data.weeklyReviews)) {
+    writeWeeklyReviews(data.weeklyReviews);
+    restored.push("주간 점검 캘린더 기록");
+  }
+
+  if (Array.isArray(data.portfolioHoldings)) {
+    writePortfolioHoldings(data.portfolioHoldings);
+    restored.push("포트폴리오 자산 배분");
+  }
+
+  if (!restored.length) {
+    throw new Error("복원 가능한 데이터가 없습니다. manualOverrides, weeklyReviews, portfolioHoldings 중 하나가 필요합니다.");
+  }
+
+  return restored;
+}
+
+function renderBackupPanel() {
+  const summary = localDataSummary();
+  return `
+    <section class="backup-panel">
+      <div class="manual-panel-header">
+        <div>
+          <h3>백업 · 복원</h3>
+          <p class="muted">수동 입력, 주간 점검 캘린더, 포트폴리오 자산 배분은 브라우저에 저장됩니다. 맥북으로 옮기기 전에 JSON 백업 파일로 내보내면 복원할 수 있습니다.</p>
+        </div>
+        ${badge("manual-updated", "localStorage")}
+      </div>
+      <div class="backup-summary-grid">
+        <div><strong>${summary.manualCount}</strong><span>수동 지표 입력</span></div>
+        <div><strong>${summary.reviewCount}</strong><span>주간 점검 기록</span></div>
+        <div><strong>${summary.portfolioCount}</strong><span>포트폴리오 자산</span></div>
+      </div>
+      <div class="backup-actions">
+        <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
+        <button type="button" class="backup-secondary" id="exportManualBackup">수동 점검 기록만 백업</button>
+        <button type="button" class="backup-secondary" id="exportPortfolioBackup">포트폴리오만 백업</button>
+        <button type="button" class="backup-secondary" id="importBackupButton">백업 파일 불러오기</button>
+        <button type="button" class="backup-danger" id="clearLocalDashboardData">전체 데이터 초기화</button>
+        <input type="file" id="backupFileInput" accept="application/json,.json" class="hidden" />
+      </div>
+      <p class="manual-storage-note">권장: 매주 토요일 점검 후 전체 백업 1회. 맥북으로 이동할 때는 이 JSON 파일을 가져와서 복원하면 됩니다.</p>
+      <div id="backupStatus" class="backup-status muted"></div>
+    </section>
+  `;
+}
+
+function setupBackupHandlers() {
+  const full = $("exportFullBackup");
+  const manual = $("exportManualBackup");
+  const portfolio = $("exportPortfolioBackup");
+  const importButton = $("importBackupButton");
+  const input = $("backupFileInput");
+  const clear = $("clearLocalDashboardData");
+  const status = $("backupStatus");
+
+  if (full) full.onclick = () => exportBackup("full");
+  if (manual) manual.onclick = () => exportBackup("manual");
+  if (portfolio) portfolio.onclick = () => exportBackup("portfolio");
+  if (importButton && input) importButton.onclick = () => input.click();
+
+  if (input) {
+    input.onchange = event => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const payload = JSON.parse(String(reader.result || "{}"));
+          const restored = restoreBackupPayload(payload);
+          if (status) status.textContent = `복원 완료: ${restored.join(", ")}`;
+          APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
+          renderAll(APP_VIEW_DATA);
+        } catch (error) {
+          if (status) status.textContent = `복원 실패: ${error.message}`;
+          alert(`복원 실패: ${error.message}`);
+        } finally {
+          input.value = "";
+        }
+      };
+      reader.readAsText(file);
+    };
+  }
+
+  if (clear) {
+    clear.onclick = () => {
+      const ok = confirm("수동 입력값, 주간 점검 기록, 포트폴리오 자산 배분을 모두 삭제할까요? 이 작업은 백업 없이는 되돌릴 수 없습니다.");
+      if (!ok) return;
+      localStorage.removeItem(MANUAL_STORAGE_KEY);
+      localStorage.removeItem(WEEKLY_REVIEW_STORAGE_KEY);
+      localStorage.removeItem(PORTFOLIO_STORAGE_KEY);
+      APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+}
+
+function injectBackupStyles() {
+  if (document.getElementById("backup-panel-style")) return;
+  const style = document.createElement("style");
+  style.id = "backup-panel-style";
+  style.textContent = `
+    .backup-panel {
+      margin-bottom: 22px;
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(59, 130, 246, 0.10), rgba(255, 255, 255, 0.035));
+      border: 1px solid rgba(96, 165, 250, 0.22);
+    }
+
+    .backup-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0;
+    }
+
+    .backup-summary-grid div {
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .backup-summary-grid strong {
+      display: block;
+      color: #ffffff;
+      font-size: 1.3rem;
+      font-weight: 900;
+      margin-bottom: 3px;
+    }
+
+    .backup-summary-grid span {
+      color: rgba(255, 255, 255, 0.70);
+      font-size: 0.84rem;
+    }
+
+    .backup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .backup-actions button {
+      border: 0;
+      border-radius: 999px;
+      padding: 9px 13px;
+      color: #ffffff;
+      font-weight: 850;
+      cursor: pointer;
+    }
+
+    .backup-primary { background: linear-gradient(135deg, #2563eb, #1d4ed8); }
+    .backup-secondary { background: rgba(255, 255, 255, 0.11); border: 1px solid rgba(255,255,255,0.14) !important; }
+    .backup-danger { background: rgba(239, 68, 68, 0.72); }
+
+    .backup-actions button:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.08);
+    }
+
+    .backup-status {
+      margin-top: 10px;
+      min-height: 18px;
+    }
+
+    @media (max-width: 720px) {
+      .backup-summary-grid { grid-template-columns: 1fr; }
+      .backup-actions button { width: 100%; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
   const visibleTodoItems = (todo.items || []).filter(item => !isAutomatedTodoItem(item));
@@ -2259,6 +2508,7 @@ function renderTodo(data) {
     ${renderManualInputPanel(data)}
     ${renderWeeklyReviewPanel(data)}
     ${renderPortfolioPanel()}
+    ${renderBackupPanel()}
     <section class="todo-section">
       <h3>기본 점검 목록</h3>
       ${visibleTodoItems.map(item => `
@@ -2275,6 +2525,7 @@ function renderTodo(data) {
   setupManualInputHandlers();
   setupWeeklyReviewHandlers();
   setupPortfolioHandlers();
+  setupBackupHandlers();
 }
 
 function renderAll(data) {
@@ -2312,6 +2563,7 @@ function setupTabs() {
 async function init() {
   setupTabs();
   injectCurrentValueStyles();
+  injectBackupStyles();
 
   try {
     const response = await fetch(DATA_URL);
