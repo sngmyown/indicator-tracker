@@ -81,6 +81,8 @@ const GOLDILOCKS_ZONES = {
 const MANUAL_STORAGE_KEY = "eightAxisManualOverridesV1";
 const WEEKLY_REVIEW_STORAGE_KEY = "eightAxisWeeklyReviewsV1";
 const PORTFOLIO_STORAGE_KEY = "eightAxisPortfolioAllocationsV1";
+const CHECKLIST_STORAGE_KEY = "eightAxisChecklistStatusV1";
+const ECONOMIC_EVENTS_STORAGE_KEY = "eightAxisEconomicEventsV1";
 
 
 const MANUAL_REQUIRED_IDS = [
@@ -124,6 +126,55 @@ const MANUAL_SIGNAL_OPTIONS = [
   { value: "neutral", label: "중립" },
   { value: "negative", label: "부정" },
   { value: "warning", label: "경고" }
+];
+
+const DEFAULT_CHECKLIST_ITEMS = [
+  { id: "manual-m7-guidance", label: "M7 가이던스 변화 입력", group: "수동 지표", cadence: "화~토 / 실적 시즌" },
+  { id: "manual-consensus-revision", label: "컨센서스 리비전 입력", group: "수동 지표", cadence: "금요일" },
+  { id: "manual-pricing-power", label: "Pricing Power 언급 입력", group: "수동 지표", cadence: "실적 콜 확인 후" },
+  { id: "manual-fear-greed", label: "Fear & Greed Index 입력", group: "수동 지표", cadence: "월요일 / 금요일" },
+  { id: "final-axis-classification", label: "8축 긍정 / 중립 / 부정 최종 분류", group: "기본 점검", cadence: "금요일 또는 토요일" },
+  { id: "active-market-scenario", label: "현재 유효한 시장 시나리오 확인", group: "기본 점검", cadence: "금요일 또는 토요일" },
+  { id: "portfolio-allocation-check", label: "포트폴리오 현금 및 자산 비중 점검", group: "기본 점검", cadence: "월요일 / 금요일 / 리밸런싱 전" },
+  { id: "weekly-backup", label: "수동 기록·포트폴리오 전체 백업", group: "기본 점검", cadence: "토요일 점검 후" }
+];
+
+const EVENT_COUNTRY_OPTIONS = [
+  { value: "US", label: "미국" },
+  { value: "KR", label: "한국" },
+  { value: "JP", label: "일본" },
+  { value: "CN", label: "중국" },
+  { value: "EU", label: "EU" },
+  { value: "GLOBAL", label: "글로벌" },
+  { value: "OTHER", label: "기타" }
+];
+
+const EVENT_AXIS_OPTIONS = [
+  { value: "rates", label: "1축 금리/유동성" },
+  { value: "earnings", label: "2축 기업 실적/가이던스" },
+  { value: "flows", label: "3축 자금 흐름" },
+  { value: "employment", label: "4축 고용/경기 사이클" },
+  { value: "consumption", label: "5축 소비/수요" },
+  { value: "margins", label: "6축 기업 마진" },
+  { value: "dollar-commodities", label: "7축 달러/원자재" },
+  { value: "volatility", label: "8축 VIX/변동성" },
+  { value: "policy", label: "정책/정치/지정학" },
+  { value: "portfolio", label: "포트폴리오/리밸런싱" },
+  { value: "other", label: "8축 외 기타" }
+];
+
+const EVENT_TIMING_OPTIONS = [
+  { value: "leading", label: "선행" },
+  { value: "coincident", label: "동행" },
+  { value: "lagging", label: "후행" },
+  { value: "event", label: "이벤트성" },
+  { value: "other", label: "기타" }
+];
+
+const EVENT_IMPORTANCE_OPTIONS = [
+  { value: "high", label: "상" },
+  { value: "medium", label: "중" },
+  { value: "low", label: "하" }
 ];
 
 let APP_RAW_DATA = null;
@@ -1552,6 +1603,8 @@ function renderOverview(data, history) {
     ${renderScenarioActionPlan(data, live)}
     ${renderHistoryOverview(data, history, live)}
     ${renderWeeklyReviewCalendar()}
+    ${renderEconomicEventCalendar()}
+    ${renderChecklistProgressCard()}
     ${renderPortfolioOverviewCard()}
     <article class="card">
       <h3>기존 시장 국면 메모</h3>
@@ -1895,6 +1948,36 @@ function writePortfolioHoldings(holdings) {
   writeJsonStorage(PORTFOLIO_STORAGE_KEY, holdings);
 }
 
+
+function readChecklistStatus() {
+  const checklist = readJsonStorage(CHECKLIST_STORAGE_KEY, {});
+  return checklist && typeof checklist === "object" && !Array.isArray(checklist) ? checklist : {};
+}
+
+function writeChecklistStatus(checklist) {
+  writeJsonStorage(CHECKLIST_STORAGE_KEY, checklist || {});
+}
+
+function readEconomicEvents() {
+  const events = readJsonStorage(ECONOMIC_EVENTS_STORAGE_KEY, []);
+  return Array.isArray(events) ? events : [];
+}
+
+function writeEconomicEvents(events) {
+  const sorted = [...events].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || String(a.title || "").localeCompare(String(b.title || "")));
+  writeJsonStorage(ECONOMIC_EVENTS_STORAGE_KEY, sorted);
+}
+
+function optionHtml(options, selected) {
+  return options.map(option => `
+    <option value="${escapeHtml(option.value)}" ${selected === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+}
+
+function labelFromOptions(options, value) {
+  return options.find(option => option.value === value)?.label || value || "-";
+}
+
 function todayKoreaDate() {
   const now = new Date();
   const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
@@ -1924,6 +2007,104 @@ function getManualOverrideSignal(id, fallback = "neutral") {
 
 function reviewValue(review, key, fallback = "") {
   return escapeHtml(review?.[key] ?? fallback);
+}
+
+
+function eventsForDate(date) {
+  return readEconomicEvents().filter(event => event.date === date);
+}
+
+function upcomingEconomicEvents(limit = 5) {
+  const today = todayKoreaDate();
+  return readEconomicEvents()
+    .filter(event => String(event.date || "") >= today)
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")))
+    .slice(0, limit);
+}
+
+function renderEventBadges(event) {
+  return `
+    ${badge("neutral", labelFromOptions(EVENT_COUNTRY_OPTIONS, event.country))}
+    ${badge(event.importance === "high" ? "warning" : event.importance === "medium" ? "neutral" : "not-applicable", `중요도 ${labelFromOptions(EVENT_IMPORTANCE_OPTIONS, event.importance)}`)}
+    ${badge("neutral", labelFromOptions(EVENT_AXIS_OPTIONS, event.axis))}
+    ${badge("neutral", labelFromOptions(EVENT_TIMING_OPTIONS, event.timing))}
+  `;
+}
+
+function renderEconomicEventCalendar() {
+  const events = readEconomicEvents();
+  const latest = latestReview();
+  const selectedDate = latest?.date || todayKoreaDate();
+  const todayEvents = eventsForDate(selectedDate);
+  const upcoming = upcomingEconomicEvents(6);
+  const dateOptions = [...new Set([selectedDate, ...events.map(event => event.date).filter(Boolean)])]
+    .sort()
+    .map(date => `<option value="${escapeHtml(date)}" ${date === selectedDate ? "selected" : ""}>${escapeHtml(date)}</option>`)
+    .join("");
+
+  const eventList = todayEvents.length ? todayEvents.map(event => `
+    <div class="economic-event-row">
+      <strong>${escapeHtml(event.title)}</strong>
+      <div class="badge-row">${renderEventBadges(event)}</div>
+      <p class="muted">${escapeHtml(event.memo || "메모 없음")}</p>
+    </div>
+  `).join("") : `<p class="muted">선택한 날짜에 저장된 이벤트가 없습니다.</p>`;
+
+  const upcomingList = upcoming.length ? upcoming.map(event => `
+    <div class="economic-event-mini">
+      <span>${escapeHtml(event.date)}</span>
+      <strong>${escapeHtml(event.title)}</strong>
+      <em>${escapeHtml(labelFromOptions(EVENT_COUNTRY_OPTIONS, event.country))} · ${escapeHtml(labelFromOptions(EVENT_AXIS_OPTIONS, event.axis))}</em>
+    </div>
+  `).join("") : `<p class="muted">예정 이벤트가 없습니다. To do / 점검 탭에서 직접 추가하세요.</p>`;
+
+  return `
+    <article class="card economic-calendar-card">
+      <h3>증시·경제 이벤트 캘린더</h3>
+      <p class="muted">국가, 8축, 선행/동행/후행 기준으로 직접 분류한 이벤트를 날짜별로 확인합니다.</p>
+      <select class="manual-input" id="economicCalendarDateSelect">
+        ${dateOptions || `<option value="${escapeHtml(todayKoreaDate())}">${escapeHtml(todayKoreaDate())}</option>`}
+      </select>
+      <div class="economic-calendar-selected" id="economicCalendarSelectedEvents">${eventList}</div>
+      <h4>다가오는 이벤트</h4>
+      <div class="economic-upcoming-list">${upcomingList}</div>
+    </article>
+  `;
+}
+
+function setupEconomicCalendarOverviewHandlers() {
+  const select = $("economicCalendarDateSelect");
+  const box = $("economicCalendarSelectedEvents");
+  if (!select || !box) return;
+  select.onchange = () => {
+    const events = eventsForDate(select.value);
+    box.innerHTML = events.length ? events.map(event => `
+      <div class="economic-event-row">
+        <strong>${escapeHtml(event.title)}</strong>
+        <div class="badge-row">${renderEventBadges(event)}</div>
+        <p class="muted">${escapeHtml(event.memo || "메모 없음")}</p>
+      </div>
+    `).join("") : `<p class="muted">선택한 날짜에 저장된 이벤트가 없습니다.</p>`;
+  };
+}
+
+function checklistCompletedCount() {
+  const status = readChecklistStatus();
+  return DEFAULT_CHECKLIST_ITEMS.filter(item => status[item.id]?.done).length;
+}
+
+function renderChecklistProgressCard() {
+  const completed = checklistCompletedCount();
+  const total = DEFAULT_CHECKLIST_ITEMS.length;
+  const pct = total ? Math.round((completed / total) * 100) : 0;
+  return `
+    <article class="card checklist-progress-card">
+      <h3>체크리스트 진행률</h3>
+      <div class="metric-value small">${completed}/${total}</div>
+      <p class="muted">이번 브라우저 기준 수동 점검 완료율 ${pct}%</p>
+      <div class="checklist-progress-bar"><span style="width:${pct}%"></span></div>
+    </article>
+  `;
 }
 
 function renderWeeklyReviewCalendar() {
@@ -2362,10 +2543,14 @@ function localDataSummary() {
   const manualOverrides = readManualOverrides();
   const weeklyReviews = readWeeklyReviews();
   const portfolioHoldings = readPortfolioHoldings();
+  const checklistStatus = readChecklistStatus();
+  const economicEvents = readEconomicEvents();
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
     reviewCount: weeklyReviews.length,
-    portfolioCount: portfolioHoldings.length
+    portfolioCount: portfolioHoldings.length,
+    checklistCount: Object.values(checklistStatus || {}).filter(item => item?.done).length,
+    eventCount: economicEvents.length
   };
 }
 
@@ -2377,11 +2562,15 @@ function buildBackupPayload(scope = "full") {
   const manualOverrides = readManualOverrides();
   const weeklyReviews = readWeeklyReviews();
   const portfolioHoldings = readPortfolioHoldings();
+  const checklistStatus = readChecklistStatus();
+  const economicEvents = readEconomicEvents();
 
   const data = {};
   if (scope === "full" || scope === "manual") {
     data.manualOverrides = manualOverrides;
     data.weeklyReviews = weeklyReviews;
+    data.checklistStatus = checklistStatus;
+    data.economicEvents = economicEvents;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -2438,6 +2627,16 @@ function restoreBackupPayload(payload) {
     restored.push("포트폴리오 자산 배분");
   }
 
+  if (data.checklistStatus && typeof data.checklistStatus === "object" && !Array.isArray(data.checklistStatus)) {
+    writeChecklistStatus(data.checklistStatus);
+    restored.push("체크리스트 완료 기록");
+  }
+
+  if (Array.isArray(data.economicEvents)) {
+    writeEconomicEvents(data.economicEvents);
+    restored.push("경제 이벤트 캘린더");
+  }
+
   if (!restored.length) {
     throw new Error("복원 가능한 데이터가 없습니다. manualOverrides, weeklyReviews, portfolioHoldings 중 하나가 필요합니다.");
   }
@@ -2460,6 +2659,8 @@ function renderBackupPanel() {
         <div><strong>${summary.manualCount}</strong><span>수동 지표 입력</span></div>
         <div><strong>${summary.reviewCount}</strong><span>주간 점검 기록</span></div>
         <div><strong>${summary.portfolioCount}</strong><span>포트폴리오 자산</span></div>
+        <div><strong>${summary.checklistCount}</strong><span>체크 완료</span></div>
+        <div><strong>${summary.eventCount}</strong><span>경제 이벤트</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -2519,6 +2720,8 @@ function setupBackupHandlers() {
       localStorage.removeItem(MANUAL_STORAGE_KEY);
       localStorage.removeItem(WEEKLY_REVIEW_STORAGE_KEY);
       localStorage.removeItem(PORTFOLIO_STORAGE_KEY);
+      localStorage.removeItem(CHECKLIST_STORAGE_KEY);
+      localStorage.removeItem(ECONOMIC_EVENTS_STORAGE_KEY);
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -2603,12 +2806,218 @@ function injectBackupStyles() {
   document.head.appendChild(style);
 }
 
+
+function renderChecklistPanel() {
+  const status = readChecklistStatus();
+  const grouped = DEFAULT_CHECKLIST_ITEMS.reduce((acc, item) => {
+    acc[item.group] = acc[item.group] || [];
+    acc[item.group].push(item);
+    return acc;
+  }, {});
+
+  const groupHtml = Object.entries(grouped).map(([group, items]) => `
+    <div class="checklist-group">
+      <h4>${escapeHtml(group)}</h4>
+      ${items.map(item => {
+        const state = status[item.id] || {};
+        return `
+          <label class="checklist-row ${state.done ? "is-done" : ""}">
+            <input type="checkbox" data-checklist-id="${escapeHtml(item.id)}" ${state.done ? "checked" : ""} />
+            <span class="checklist-main">
+              <strong>${escapeHtml(item.label)}</strong>
+              <em>${escapeHtml(item.cadence)}</em>
+            </span>
+            <span class="checklist-date">${state.doneAt ? `완료 ${escapeHtml(state.doneAt.slice(0, 10))}` : "미완료"}</span>
+          </label>
+          <textarea class="manual-input checklist-note" data-checklist-note="${escapeHtml(item.id)}" rows="2" placeholder="이 항목에 대한 짧은 메모">${escapeHtml(state.note || "")}</textarea>
+        `;
+      }).join("")}
+    </div>
+  `).join("");
+
+  return `
+    <section class="checklist-panel">
+      <div class="manual-panel-header">
+        <div>
+          <h3>체크리스트 완료 기록</h3>
+          <p class="muted">완료 체크를 누르면 현재 날짜가 저장됩니다. 금요일·토요일 최종 점검 또는 월요일 장 시작 전 점검용입니다.</p>
+        </div>
+        ${badge("manual-updated", "완료일 저장")}
+      </div>
+      ${groupHtml}
+      <div class="weekly-review-actions">
+        <button type="button" class="review-delete" id="resetChecklistStatus">체크리스트 초기화</button>
+      </div>
+    </section>
+  `;
+}
+
+function setupChecklistHandlers() {
+  document.querySelectorAll("[data-checklist-id]").forEach(input => {
+    input.onchange = () => {
+      const id = input.dataset.checklistId;
+      const state = readChecklistStatus();
+      const previous = state[id] || {};
+      state[id] = {
+        ...previous,
+        done: input.checked,
+        doneAt: input.checked ? new Date().toISOString() : "",
+        updatedAt: new Date().toISOString()
+      };
+      writeChecklistStatus(state);
+      renderAll(APP_VIEW_DATA);
+    };
+  });
+
+  document.querySelectorAll("[data-checklist-note]").forEach(textarea => {
+    textarea.onchange = () => {
+      const id = textarea.dataset.checklistNote;
+      const state = readChecklistStatus();
+      state[id] = {
+        ...(state[id] || {}),
+        note: textarea.value,
+        updatedAt: new Date().toISOString()
+      };
+      writeChecklistStatus(state);
+    };
+  });
+
+  const reset = $("resetChecklistStatus");
+  if (reset) {
+    reset.onclick = () => {
+      if (!confirm("체크리스트 완료 여부와 메모를 모두 초기화할까요?")) return;
+      writeChecklistStatus({});
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+}
+
+function eventFormValue(id) {
+  return $(id)?.value ?? "";
+}
+
+function renderEconomicEventPanel() {
+  const events = readEconomicEvents();
+  const rows = events.length ? events.map(event => `
+    <div class="economic-event-admin-row">
+      <div>
+        <strong>${escapeHtml(event.date)} · ${escapeHtml(event.title)}</strong>
+        <div class="badge-row">${renderEventBadges(event)}</div>
+        <p class="muted">${escapeHtml(event.memo || "메모 없음")}</p>
+      </div>
+      <div class="portfolio-row-actions">
+        <button type="button" class="portfolio-edit" data-event-edit="${escapeHtml(event.id)}">수정</button>
+        <button type="button" class="portfolio-delete" data-event-delete="${escapeHtml(event.id)}">삭제</button>
+      </div>
+    </div>
+  `).join("") : `<p class="muted">아직 저장된 경제 이벤트가 없습니다.</p>`;
+
+  return `
+    <section class="economic-event-panel">
+      <div class="manual-panel-header">
+        <div>
+          <h3>증시·경제 이벤트 직접 등록</h3>
+          <p class="muted">중요 이벤트를 국가, 8축, 선행/동행/후행 기준으로 분류해 캘린더에 저장합니다. 8축에 없는 사건은 정책/기타로 표시할 수 있습니다.</p>
+        </div>
+        ${badge("manual-updated", "캘린더 저장")}
+      </div>
+      <input type="hidden" id="eventEditId" value="" />
+      <div class="review-grid">
+        <label><span>날짜</span><input class="manual-input" type="date" id="eventDate" value="${escapeHtml(todayKoreaDate())}" /></label>
+        <label><span>이벤트명</span><input class="manual-input" id="eventTitle" placeholder="예: FOMC, CPI, BOJ 회의, 한국 수출" /></label>
+        <label><span>국가/지역</span><select class="manual-input" id="eventCountry">${optionHtml(EVENT_COUNTRY_OPTIONS, "US")}</select></label>
+        <label><span>시장 8축/분류</span><select class="manual-input" id="eventAxis">${optionHtml(EVENT_AXIS_OPTIONS, "rates")}</select></label>
+        <label><span>시간성</span><select class="manual-input" id="eventTiming">${optionHtml(EVENT_TIMING_OPTIONS, "leading")}</select></label>
+        <label><span>중요도</span><select class="manual-input" id="eventImportance">${optionHtml(EVENT_IMPORTANCE_OPTIONS, "medium")}</select></label>
+      </div>
+      <label class="review-note-label"><span>메모</span><textarea class="manual-input" id="eventMemo" rows="3" placeholder="예상치, 실제치, 시장 반응, 내 시나리오에 미치는 영향을 적어두세요."></textarea></label>
+      <div class="weekly-review-actions">
+        <button type="button" class="review-save" id="saveEconomicEvent">이벤트 저장</button>
+        <button type="button" class="portfolio-cancel" id="cancelEconomicEventEdit" style="display:none;">편집 취소</button>
+      </div>
+      <div class="economic-event-list">${rows}</div>
+    </section>
+  `;
+}
+
+function clearEconomicEventForm() {
+  const ids = ["eventEditId", "eventTitle", "eventMemo"];
+  ids.forEach(id => { const el = $(id); if (el) el.value = ""; });
+  const date = $("eventDate"); if (date) date.value = todayKoreaDate();
+  const country = $("eventCountry"); if (country) country.value = "US";
+  const axis = $("eventAxis"); if (axis) axis.value = "rates";
+  const timing = $("eventTiming"); if (timing) timing.value = "leading";
+  const importance = $("eventImportance"); if (importance) importance.value = "medium";
+  const save = $("saveEconomicEvent"); if (save) save.textContent = "이벤트 저장";
+  const cancel = $("cancelEconomicEventEdit"); if (cancel) cancel.style.display = "none";
+}
+
+function setupEconomicEventHandlers() {
+  const save = $("saveEconomicEvent");
+  const cancel = $("cancelEconomicEventEdit");
+  if (save) {
+    save.onclick = () => {
+      const title = eventFormValue("eventTitle").trim();
+      if (!title) {
+        alert("이벤트명을 입력하세요.");
+        return;
+      }
+      const editId = eventFormValue("eventEditId");
+      const events = readEconomicEvents();
+      const payload = {
+        id: editId || `event-${Date.now()}`,
+        date: eventFormValue("eventDate") || todayKoreaDate(),
+        title,
+        country: eventFormValue("eventCountry") || "US",
+        axis: eventFormValue("eventAxis") || "other",
+        timing: eventFormValue("eventTiming") || "other",
+        importance: eventFormValue("eventImportance") || "medium",
+        memo: eventFormValue("eventMemo"),
+        updatedAt: new Date().toISOString()
+      };
+      if (editId) writeEconomicEvents(events.map(event => event.id === editId ? payload : event));
+      else writeEconomicEvents([...events, payload]);
+      clearEconomicEventForm();
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+  if (cancel) cancel.onclick = () => clearEconomicEventForm();
+
+  document.querySelectorAll("[data-event-edit]").forEach(button => {
+    button.onclick = () => {
+      const event = readEconomicEvents().find(item => item.id === button.dataset.eventEdit);
+      if (!event) return;
+      $("eventEditId").value = event.id;
+      $("eventDate").value = event.date || todayKoreaDate();
+      $("eventTitle").value = event.title || "";
+      $("eventCountry").value = event.country || "US";
+      $("eventAxis").value = event.axis || "other";
+      $("eventTiming").value = event.timing || "other";
+      $("eventImportance").value = event.importance || "medium";
+      $("eventMemo").value = event.memo || "";
+      const save = $("saveEconomicEvent"); if (save) save.textContent = "이벤트 수정 저장";
+      const cancel = $("cancelEconomicEventEdit"); if (cancel) cancel.style.display = "inline-flex";
+      window.scrollTo({ top: $("todoView")?.offsetTop || 0, behavior: "smooth" });
+    };
+  });
+
+  document.querySelectorAll("[data-event-delete]").forEach(button => {
+    button.onclick = () => {
+      if (!confirm("이 이벤트를 삭제할까요?")) return;
+      writeEconomicEvents(readEconomicEvents().filter(event => event.id !== button.dataset.eventDelete));
+      renderAll(APP_VIEW_DATA);
+    };
+  });
+}
+
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
   const visibleTodoItems = (todo.items || []).filter(item => !isAutomatedTodoItem(item));
   $("todoList").innerHTML = `
+    ${renderChecklistPanel()}
     ${renderManualInputPanel(data)}
     ${renderWeeklyReviewPanel(data)}
+    ${renderEconomicEventPanel()}
     ${renderPortfolioPanel()}
     ${renderBackupPanel()}
     <section class="todo-section">
@@ -2624,8 +3033,10 @@ function renderTodo(data) {
       `).join("")}
     </section>
   `;
+  setupChecklistHandlers();
   setupManualInputHandlers();
   setupWeeklyReviewHandlers();
+  setupEconomicEventHandlers();
   setupPortfolioHandlers();
   setupBackupHandlers();
 }
@@ -2634,6 +3045,7 @@ function renderAll(data) {
   renderMeta(data);
   renderOverview(data, APP_HISTORY_DATA);
   setupReviewCalendarHandlers();
+  setupEconomicCalendarOverviewHandlers();
   renderAxes(data);
   renderTiming(data);
   renderMatrix(data);
@@ -2662,10 +3074,166 @@ function setupTabs() {
   });
 }
 
+
+function injectChecklistCalendarStyles() {
+  if (document.getElementById("checklist-calendar-style")) return;
+  const style = document.createElement("style");
+  style.id = "checklist-calendar-style";
+  style.textContent = `
+    .checklist-panel,
+    .economic-event-panel {
+      margin-bottom: 22px;
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(34, 197, 94, 0.09), rgba(255, 255, 255, 0.035));
+      border: 1px solid rgba(74, 222, 128, 0.20);
+    }
+
+    .checklist-group {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .checklist-group h4,
+    .economic-calendar-card h4 {
+      margin: 10px 0 4px;
+      color: rgba(255,255,255,0.88);
+    }
+
+    .checklist-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      cursor: pointer;
+    }
+
+    .checklist-row.is-done {
+      background: rgba(34, 197, 94, 0.11);
+      border-color: rgba(74, 222, 128, 0.28);
+    }
+
+    .checklist-row input {
+      width: 18px;
+      height: 18px;
+      accent-color: #22c55e;
+    }
+
+    .checklist-main strong {
+      display: block;
+      color: #ffffff;
+      font-size: 0.92rem;
+    }
+
+    .checklist-main em,
+    .checklist-date {
+      color: rgba(255,255,255,0.66);
+      font-size: 0.80rem;
+      font-style: normal;
+      font-weight: 800;
+    }
+
+    .checklist-note {
+      margin: -4px 0 8px 30px;
+      width: calc(100% - 30px);
+      box-sizing: border-box;
+    }
+
+    .checklist-progress-bar {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.10);
+      margin-top: 12px;
+    }
+
+    .checklist-progress-bar span {
+      display: block;
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #22c55e, #86efac);
+    }
+
+    .economic-event-row,
+    .economic-event-admin-row,
+    .economic-event-mini {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      margin-top: 8px;
+    }
+
+    .economic-event-admin-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .economic-event-mini {
+      display: grid;
+      grid-template-columns: 86px 1fr;
+      gap: 8px 10px;
+      align-items: center;
+    }
+
+    .economic-event-mini span {
+      color: rgba(255,255,255,0.62);
+      font-weight: 850;
+      font-size: 0.80rem;
+    }
+
+    .economic-event-mini strong,
+    .economic-event-row strong,
+    .economic-event-admin-row strong {
+      color: #ffffff;
+    }
+
+    .economic-event-mini em {
+      grid-column: 2;
+      color: rgba(255,255,255,0.62);
+      font-style: normal;
+      font-size: 0.78rem;
+      margin-top: -4px;
+    }
+
+    .economic-event-list {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    @media (max-width: 720px) {
+      .checklist-row,
+      .economic-event-admin-row,
+      .economic-event-mini {
+        grid-template-columns: 1fr;
+      }
+      .checklist-date,
+      .portfolio-row-actions {
+        justify-self: start;
+      }
+      .checklist-note {
+        margin-left: 0;
+        width: 100%;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 async function init() {
   setupTabs();
   injectCurrentValueStyles();
   injectBackupStyles();
+  injectChecklistCalendarStyles();
 
   try {
     const response = await fetch(DATA_URL);
