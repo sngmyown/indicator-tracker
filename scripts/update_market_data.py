@@ -765,27 +765,48 @@ def vix_change_signal(change_percent):
 
 
 def rate_signal(value, change):
-    if value >= 4.75 or change >= 0.15:
+    """2년물/10년물 금리 신호 v2.
+
+    기존 버전은 하루 하락폭이 크면 금리 레벨이 아직 높아도 positive로 바뀌는 문제가 있었습니다.
+    여기서는 레벨을 우선하고, 변화율은 보조로만 사용합니다.
+    - 4.60% 이상: 할인율 부담이 큰 구간 → 부정
+    - 4.25~4.60%: 부담은 있으나 급등이 아니면 경고
+    - 3.75~4.25%: 중립권
+    - 3.75% 미만: 완화적 금리 환경. 단, 급락은 경기둔화 신호일 수 있어 중립 처리
+    """
+    if value >= 4.60 or change >= 0.20:
         return "negative", -1
 
-    if value <= 4.0 or change <= -0.15:
+    if value >= 4.25 or change >= 0.10:
+        return "warning", 0
+
+    if 3.75 <= value < 4.25:
+        return "neutral", 0
+
+    if value < 3.75 and change > -0.25:
         return "positive", 1
 
     return "neutral", 0
 
 
 def initial_claims_signal(value, change):
-    """신규 실업수당 청구건수 해석 기준.
+    """신규 실업수당 청구건수 신호 v2.
 
-    value는 FRED ICSA의 최신 청구건수입니다.
-    change는 직전 관측치 대비 증감입니다.
-    절대값과 변화 속도를 함께 봅니다.
+    청구건수 절대 레벨과 증가 속도를 분리합니다.
+    20만~24만 건은 골디락스권이지만, 전주 대비 급증하면 즉시 긍정으로 보면 안 됩니다.
+    특히 DOL 원자료 프록시는 계절조정 ICSA와 다를 수 있어 급격한 변화는 warning으로 낮춥니다.
     """
-    if value >= 260000 or change >= 15000:
+    if value >= 275000:
         return "negative", -1
 
-    if value <= 230000 and change <= 5000:
+    if value >= 250000 or change >= 30000:
+        return "warning", 0
+
+    if 200000 <= value <= 240000 and -10000 <= change <= 10000:
         return "positive", 1
+
+    if value < 200000:
+        return "warning", 0
 
     return "neutral", 0
 
@@ -809,26 +830,39 @@ def unemployment_rate_signal(value, change):
 
 
 def dollar_index_signal(value, change_percent):
-    """달러 지수 해석 기준.
+    """달러 지수 신호 v2.
 
-    DTWEXBGS와 DXY 선물 프록시는 절대 레벨이 다르므로,
-    자동 점수는 절대값보다 단기 변화율을 중심으로 판단합니다.
-    달러 급등은 위험자산과 원자재에 부담으로 봅니다.
+    DXY 프록시가 95~103 부근에서 안정되면 글로벌 달러 유동성 압박이 낮은 구간으로 봅니다.
+    105 이상 또는 급등은 위험자산·원자재에 부담입니다.
+    FRED 광의달러지수처럼 레벨 체계가 다른 값이 들어올 수 있으므로 115 이상이면 변화율 중심으로만 판단합니다.
     """
-    if change_percent >= 1.0:
+    if value >= 115:
+        if change_percent >= 1.0:
+            return "negative", -1
+        if change_percent <= -1.0:
+            return "positive", 1
+        return "neutral", 0
+
+    if value >= 105 or change_percent >= 1.0:
         return "negative", -1
 
-    if change_percent <= -1.0:
+    if 103 <= value < 105:
+        return "warning", 0
+
+    if 95 <= value < 103 and abs(change_percent) < 0.8:
+        return "positive", 1
+
+    if value < 95 and change_percent <= 0.8:
         return "positive", 1
 
     return "neutral", 0
 
 
 def wti_oil_signal(value, change_percent):
-    """WTI 원유 해석 기준.
+    """WTI 원유 신호 v2.
 
-    유가 급등은 인플레이션 압력과 금리 부담으로 연결될 수 있습니다.
-    반대로 과도한 급락은 경기 둔화 신호일 수 있으므로 단순 긍정으로 보지 않습니다.
+    65~85달러는 네 프레임에서 인플레이션 쇼크도, 수요 붕괴도 아닌 안정권에 가깝습니다.
+    90달러 이상 또는 단기 급등은 물가·금리 부담, 55달러 이하는 수요 둔화 경고로 봅니다.
     """
     if value >= 90 or change_percent >= 5.0:
         return "negative", -1
@@ -836,10 +870,13 @@ def wti_oil_signal(value, change_percent):
     if value <= 55 or change_percent <= -7.0:
         return "warning", 0
 
-    if 60 <= value <= 85 and abs(change_percent) < 5.0:
+    if 65 <= value <= 85 and abs(change_percent) < 5.0:
+        return "positive", 1
+
+    if 55 < value < 65:
         return "neutral", 0
 
-    return "neutral", 0
+    return "warning", 0
 
 
 def copper_price_signal(value, change_percent):
@@ -1033,10 +1070,11 @@ def update_vix(data):
 
 
 def vix_term_structure_signal(spread_percent, vix_spot=None, vx1=None, vx2=None):
-    """Return signal/score/label for VIX futures term structure.
+    """VIX 만기구조 신호 v2.
 
     spread_percent = (VX2 - VX1) / VX1 * 100
-    VX2 > VX1 이면 콘탱고, VX2 < VX1 이면 백워데이션입니다.
+    콘탱고는 정상 구조로 위험자산에는 대체로 우호적입니다.
+    다만 VIX 현물이 12 이하로 과도하게 낮으면서 강한 콘탱고가 나오면 방심 리스크로 warning 처리합니다.
     """
     if not is_number(spread_percent):
         return "source-error", 0, "확인 불가"
@@ -1047,11 +1085,12 @@ def vix_term_structure_signal(spread_percent, vix_spot=None, vx1=None, vx2=None)
         return "negative", -1, "백워데이션"
     if spread_percent <= 1:
         return "neutral", 0, "평탄"
-    if spread_percent <= 8:
-        return "positive", 1, "콘탱고"
+    if spread_percent >= 8:
+        if is_number(vix_spot) and vix_spot <= 12:
+            return "warning", 0, "강한 콘탱고"
+        return "positive", 1, "강한 콘탱고"
 
-    # 매우 가파른 콘탱고는 정상 위험선호이지만 방심/과열 가능성도 있으므로 점수는 중립에 둡니다.
-    return "warning", 0, "강한 콘탱고"
+    return "positive", 1, "콘탱고"
 
 
 def update_vix_futures_structure(data):
@@ -2991,34 +3030,68 @@ def ten_two_spread_signal(value):
 
 
 def real_yield_signal(value, change):
-    if value >= 2.25 or change >= 0.15:
+    """10년 실질금리 신호 v2.
+
+    실질금리는 성장주/장기자산 할인율의 핵심입니다.
+    2% 이상은 레벨 자체가 부담이므로 하루 하락만으로 neutral/positive로 돌리지 않습니다.
+    """
+    if value >= 2.0 or change >= 0.15:
         return "negative", -1
-    if value <= 1.25 or change <= -0.15:
+    if value >= 1.75:
+        return "warning", 0
+    if 0.75 <= value < 1.75:
+        return "neutral", 0
+    if value < 0.75 and change > -0.25:
         return "positive", 1
     return "neutral", 0
 
 
 def fed_funds_signal(value, change):
-    if value >= 5.0 or change >= 0.10:
+    """Effective Fed Funds Rate 신호 v2.
+
+    낮아졌다는 사실만으로 즉시 positive로 보지 않습니다.
+    실제 정책금리가 3.5~4.5%에 머물면 아직 중립/제한적 구간으로 처리합니다.
+    """
+    if value >= 4.75 or change >= 0.10:
         return "negative", -1
-    if value <= 4.0 or change <= -0.10:
+    if value >= 3.50:
+        return "neutral", 0
+    if value < 3.50 and change <= 0.05:
         return "positive", 1
     return "neutral", 0
 
 
 def payrolls_signal(value):
-    if value < 50000:
+    """NFP 신호 v2.
+
+    15만~25만 명은 고용이 식지 않으면서도 과열은 아닌 골디락스권입니다.
+    너무 낮으면 경기 둔화, 너무 높으면 임금/금리 부담으로 단순 긍정 처리하지 않습니다.
+    """
+    if value < 75000:
         return "negative", -1
-    if value >= 150000:
+    if 100000 <= value <= 250000:
         return "positive", 1
-    return "neutral", 0
+    if 75000 <= value < 100000:
+        return "warning", 0
+    if 250000 < value <= 350000:
+        return "neutral", 0
+    return "warning", 0
 
 
 def wage_yoy_signal(value):
+    """임금 YoY 신호 v2.
+
+    2.8~3.8%는 소비 소득과 마진 부담 사이의 골디락스권으로 봅니다.
+    4.5% 이상은 서비스 인플레와 마진 압박, 2.5% 이하는 수요 둔화 경고입니다.
+    """
     if value >= 4.5:
         return "negative", -1
-    if value <= 3.2:
+    if 4.0 <= value < 4.5:
+        return "warning", 0
+    if 2.8 <= value < 4.0:
         return "positive", 1
+    if value < 2.5:
+        return "warning", 0
     return "neutral", 0
 
 
@@ -4096,11 +4169,11 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-ppi-final-demand-fix-v1",
+        "automationStatus": "full-auto-broad-indicators-signal-recalibration-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
-            "이번 버전은 기존 자동화 지표에 더해 실질금리·정책금리·NFP·임금·PPI의 공식 대체 소스를 보강하고, ETF 흐름 프록시는 가격 변화율로 표시합니다.",
+            "이번 버전은 기존 자동화 지표에 더해 금리·고용·소비·달러·원자재·VIX 신호 기준을 레벨 우선 방식으로 재보정했습니다.",
             "추가 금리 지표: 10Y-2Y 스프레드, 10년 실질금리, Effective Fed Funds Rate.",
             "추가 고용 지표: 비농업 고용자 수 변화, 시간당 평균 임금 YoY.",
             "자금흐름 축은 실제 ETF fund flow가 아니라 SPY/QQQ/IWM/SQQQ 가격 기반 프록시로 먼저 자동화했습니다.",
@@ -4152,7 +4225,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-ppi-final-demand-fix-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-signal-recalibration-v1", flush=True)
 
 
 if __name__ == "__main__":
