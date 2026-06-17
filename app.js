@@ -2031,61 +2031,246 @@ function renderEventBadges(event) {
   `;
 }
 
-function renderEconomicEventCalendar() {
-  const events = readEconomicEvents();
-  const latest = latestReview();
-  const selectedDate = latest?.date || todayKoreaDate();
-  const todayEvents = eventsForDate(selectedDate);
-  const upcoming = upcomingEconomicEvents(6);
-  const dateOptions = [...new Set([selectedDate, ...events.map(event => event.date).filter(Boolean)])]
-    .sort()
-    .map(date => `<option value="${escapeHtml(date)}" ${date === selectedDate ? "selected" : ""}>${escapeHtml(date)}</option>`)
-    .join("");
+const CALENDAR_STATE_STORAGE_KEY = "market-dashboard-calendar-state-v1";
 
-  const eventList = todayEvents.length ? todayEvents.map(event => `
+function readCalendarState() {
+  const today = todayKoreaDate();
+  const raw = readJsonStorage(CALENDAR_STATE_STORAGE_KEY, null);
+  if (!raw || typeof raw !== "object") {
+    return { selectedDate: today, month: today.slice(0, 7) };
+  }
+  const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(raw.selectedDate || "") ? raw.selectedDate : today;
+  const month = /^\d{4}-\d{2}$/.test(raw.month || "") ? raw.month : selectedDate.slice(0, 7);
+  return { selectedDate, month };
+}
+
+function writeCalendarState(state) {
+  const today = todayKoreaDate();
+  const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(state?.selectedDate || "") ? state.selectedDate : today;
+  const month = /^\d{4}-\d{2}$/.test(state?.month || "") ? state.month : selectedDate.slice(0, 7);
+  writeJsonStorage(CALENDAR_STATE_STORAGE_KEY, { selectedDate, month });
+}
+
+function ymdParts(dateString) {
+  const [year, month, day] = String(dateString || "").split("-").map(Number);
+  return { year: year || 1970, month: month || 1, day: day || 1 };
+}
+
+function makeYmd(year, month, day) {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function shiftMonth(monthString, delta) {
+  const [year, month] = String(monthString || todayKoreaDate().slice(0, 7)).split("-").map(Number);
+  const date = new Date(year, (month || 1) - 1 + delta, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabel(monthString) {
+  const [year, month] = String(monthString).split("-");
+  return `${year}년 ${Number(month)}월`;
+}
+
+function checklistItemsForDate(dateString) {
+  const status = readChecklistStatus();
+  return DEFAULT_CHECKLIST_ITEMS
+    .map(item => ({ item, state: status[item.id] || {} }))
+    .filter(row => row.state.doneAt && String(row.state.doneAt).slice(0, 10) === dateString);
+}
+
+function economicEventsForMonth(monthString) {
+  return readEconomicEvents().filter(event => String(event.date || "").startsWith(monthString));
+}
+
+function renderCalendarCell(dateString, currentMonth, selectedDate, today) {
+  const { day } = ymdParts(dateString);
+  const inMonth = dateString.startsWith(currentMonth);
+  const eventCount = eventsForDate(dateString).length;
+  const checklistCount = checklistItemsForDate(dateString).length;
+  const review = getReviewByDate(dateString);
+  const classes = [
+    "calendar-day",
+    inMonth ? "is-current-month" : "is-out-month",
+    dateString === today ? "is-today" : "",
+    dateString === selectedDate ? "is-selected" : "",
+    eventCount ? "has-events" : "",
+    checklistCount ? "has-checklist" : "",
+    review ? "has-review" : ""
+  ].filter(Boolean).join(" ");
+
+  const dotHtml = `
+    <span class="calendar-dots">
+      ${eventCount ? `<i class="dot event-dot" title="이벤트 ${eventCount}개"></i>` : ""}
+      ${checklistCount ? `<i class="dot checklist-dot" title="체크리스트 ${checklistCount}개"></i>` : ""}
+      ${review ? `<i class="dot review-dot" title="주간 점검 기록"></i>` : ""}
+    </span>
+  `;
+
+  return `
+    <button type="button" class="${classes}" data-calendar-date="${escapeHtml(dateString)}" aria-label="${escapeHtml(dateString)}">
+      <span class="calendar-day-number">${day}</span>
+      ${dotHtml}
+      ${eventCount ? `<span class="calendar-day-mini">이벤트 ${eventCount}</span>` : ""}
+      ${review ? `<span class="calendar-day-mini review-mini">점검</span>` : ""}
+    </button>
+  `;
+}
+
+function buildMonthGrid(monthString, selectedDate) {
+  const [year, month] = monthString.split("-").map(Number);
+  const today = todayKoreaDate();
+  const firstDay = new Date(year, month - 1, 1);
+  const startOffset = firstDay.getDay();
+  const startDate = new Date(year, month - 1, 1 - startOffset);
+  const cells = [];
+  for (let i = 0; i < 42; i += 1) {
+    const d = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + i);
+    const dateString = makeYmd(d.getFullYear(), d.getMonth() + 1, d.getDate());
+    cells.push(renderCalendarCell(dateString, monthString, selectedDate, today));
+  }
+  return cells.join("");
+}
+
+function renderSelectedDateDetails(selectedDate) {
+  const events = eventsForDate(selectedDate);
+  const checklistRows = checklistItemsForDate(selectedDate);
+  const review = getReviewByDate(selectedDate);
+
+  const eventList = events.length ? events.map(event => `
     <div class="economic-event-row">
       <strong>${escapeHtml(event.title)}</strong>
       <div class="badge-row">${renderEventBadges(event)}</div>
       <p class="muted">${escapeHtml(event.memo || "메모 없음")}</p>
     </div>
-  `).join("") : `<p class="muted">선택한 날짜에 저장된 이벤트가 없습니다.</p>`;
+  `).join("") : `<p class="muted">선택한 날짜에 저장된 경제·증시 이벤트가 없습니다.</p>`;
 
+  const checklistList = checklistRows.length ? checklistRows.map(row => `
+    <div class="calendar-checklist-row">
+      <strong>${escapeHtml(row.item.label)}</strong>
+      <span>${escapeHtml(row.item.cadence)}</span>
+      ${row.state.note ? `<p class="muted">${escapeHtml(row.state.note)}</p>` : ""}
+    </div>
+  `).join("") : `<p class="muted">이 날짜에 완료 처리된 체크리스트가 없습니다.</p>`;
+
+  const reviewBox = review ? `
+    <div class="saved-review-box calendar-review-box">
+      <strong>주간 점검 기록</strong>
+      <dl>
+        <dt>M7</dt><dd>${reviewValue(review, "m7Guidance", "-")} · ${labelStatus(review.m7Signal)}</dd>
+        <dt>컨센서스</dt><dd>${reviewValue(review, "consensusRevision", "-")} · ${labelStatus(review.consensusSignal)}</dd>
+        <dt>Pricing Power</dt><dd>${reviewValue(review, "pricingPower", "-")} · ${labelStatus(review.pricingSignal)}</dd>
+        <dt>Fear & Greed</dt><dd>${reviewValue(review, "fearGreed", "-")} · ${labelStatus(review.fearGreedSignal)}</dd>
+        <dt>최종 8축</dt><dd>${reviewValue(review, "finalAxisClass", "-")}</dd>
+        <dt>시나리오</dt><dd>${reviewValue(review, "activeScenario", "-")}</dd>
+        <dt>현금/자산</dt><dd>${reviewValue(review, "cashAllocationNote", "-")}</dd>
+        <dt>메모</dt><dd>${reviewValue(review, "weeklyMemo", "-")}</dd>
+      </dl>
+    </div>
+  ` : `<p class="muted">이 날짜에 저장된 주간 점검 기록이 없습니다.</p>`;
+
+  return `
+    <div class="calendar-detail-box">
+      <div class="calendar-detail-header">
+        <strong>${escapeHtml(selectedDate)}</strong>
+        <span>${events.length}개 이벤트 · ${checklistRows.length}개 완료 · ${review ? "점검 기록 있음" : "점검 기록 없음"}</span>
+      </div>
+      <div class="calendar-detail-grid">
+        <section>
+          <h4>이벤트</h4>
+          ${eventList}
+        </section>
+        <section>
+          <h4>체크리스트 완료</h4>
+          ${checklistList}
+        </section>
+        <section>
+          <h4>주간 점검 기록</h4>
+          ${reviewBox}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderEconomicEventCalendar() {
+  const state = readCalendarState();
+  const currentMonth = state.month;
+  const selectedDate = state.selectedDate;
+  const monthEvents = economicEventsForMonth(currentMonth);
+  const upcoming = upcomingEconomicEvents(6);
+  const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"];
   const upcomingList = upcoming.length ? upcoming.map(event => `
-    <div class="economic-event-mini">
+    <button type="button" class="economic-event-mini event-jump" data-calendar-date="${escapeHtml(event.date)}">
       <span>${escapeHtml(event.date)}</span>
       <strong>${escapeHtml(event.title)}</strong>
       <em>${escapeHtml(labelFromOptions(EVENT_COUNTRY_OPTIONS, event.country))} · ${escapeHtml(labelFromOptions(EVENT_AXIS_OPTIONS, event.axis))}</em>
-    </div>
+    </button>
   `).join("") : `<p class="muted">예정 이벤트가 없습니다. To do / 점검 탭에서 직접 추가하세요.</p>`;
 
   return `
-    <article class="card economic-calendar-card">
-      <h3>증시·경제 이벤트 캘린더</h3>
-      <p class="muted">국가, 8축, 선행/동행/후행 기준으로 직접 분류한 이벤트를 날짜별로 확인합니다.</p>
-      <select class="manual-input" id="economicCalendarDateSelect">
-        ${dateOptions || `<option value="${escapeHtml(todayKoreaDate())}">${escapeHtml(todayKoreaDate())}</option>`}
-      </select>
-      <div class="economic-calendar-selected" id="economicCalendarSelectedEvents">${eventList}</div>
+    <article class="card economic-calendar-card full-calendar-card">
+      <div class="calendar-topbar">
+        <div>
+          <h3>증시·경제 이벤트 캘린더</h3>
+          <p class="muted">이벤트, 체크리스트 완료, 주간 점검 기록을 월간 달력에서 확인합니다.</p>
+        </div>
+        <div class="calendar-actions">
+          <button type="button" data-calendar-shift="-1">이전달</button>
+          <button type="button" data-calendar-today="1">오늘</button>
+          <button type="button" data-calendar-shift="1">다음달</button>
+        </div>
+      </div>
+      <div class="calendar-month-label">${escapeHtml(monthLabel(currentMonth))}</div>
+      <div class="calendar-legend">
+        <span><i class="dot event-dot"></i> 이벤트</span>
+        <span><i class="dot checklist-dot"></i> 체크리스트</span>
+        <span><i class="dot review-dot"></i> 주간 점검</span>
+      </div>
+      <div class="calendar-weekdays">
+        ${weekdayLabels.map(day => `<span>${day}</span>`).join("")}
+      </div>
+      <div class="calendar-grid">
+        ${buildMonthGrid(currentMonth, selectedDate)}
+      </div>
+      ${renderSelectedDateDetails(selectedDate)}
       <h4>다가오는 이벤트</h4>
       <div class="economic-upcoming-list">${upcomingList}</div>
+      <p class="muted">이번 달 저장 이벤트: ${monthEvents.length}개. 이벤트 추가·수정은 To do / 점검 탭에서 합니다.</p>
     </article>
   `;
 }
 
 function setupEconomicCalendarOverviewHandlers() {
-  const select = $("economicCalendarDateSelect");
-  const box = $("economicCalendarSelectedEvents");
-  if (!select || !box) return;
-  select.onchange = () => {
-    const events = eventsForDate(select.value);
-    box.innerHTML = events.length ? events.map(event => `
-      <div class="economic-event-row">
-        <strong>${escapeHtml(event.title)}</strong>
-        <div class="badge-row">${renderEventBadges(event)}</div>
-        <p class="muted">${escapeHtml(event.memo || "메모 없음")}</p>
-      </div>
-    `).join("") : `<p class="muted">선택한 날짜에 저장된 이벤트가 없습니다.</p>`;
-  };
+  document.querySelectorAll("[data-calendar-date]").forEach(button => {
+    button.onclick = () => {
+      const selectedDate = button.dataset.calendarDate;
+      if (!selectedDate) return;
+      writeCalendarState({ selectedDate, month: selectedDate.slice(0, 7) });
+      renderAll(APP_VIEW_DATA);
+    };
+  });
+
+  document.querySelectorAll("[data-calendar-shift]").forEach(button => {
+    button.onclick = () => {
+      const state = readCalendarState();
+      const nextMonth = shiftMonth(state.month, Number(button.dataset.calendarShift || 0));
+      const selectedDay = ymdParts(state.selectedDate).day;
+      const [year, month] = nextMonth.split("-").map(Number);
+      const lastDay = new Date(year, month, 0).getDate();
+      const nextDate = makeYmd(year, month, Math.min(selectedDay, lastDay));
+      writeCalendarState({ selectedDate: nextDate, month: nextMonth });
+      renderAll(APP_VIEW_DATA);
+    };
+  });
+
+  const todayButton = document.querySelector("[data-calendar-today]");
+  if (todayButton) {
+    todayButton.onclick = () => {
+      const today = todayKoreaDate();
+      writeCalendarState({ selectedDate: today, month: today.slice(0, 7) });
+      renderAll(APP_VIEW_DATA);
+    };
+  }
 }
 
 function checklistCompletedCount() {
@@ -2545,12 +2730,14 @@ function localDataSummary() {
   const portfolioHoldings = readPortfolioHoldings();
   const checklistStatus = readChecklistStatus();
   const economicEvents = readEconomicEvents();
+  const calendarState = readCalendarState();
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
     reviewCount: weeklyReviews.length,
     portfolioCount: portfolioHoldings.length,
     checklistCount: Object.values(checklistStatus || {}).filter(item => item?.done).length,
-    eventCount: economicEvents.length
+    eventCount: economicEvents.length,
+    calendarMonth: calendarState.month
   };
 }
 
@@ -2564,6 +2751,7 @@ function buildBackupPayload(scope = "full") {
   const portfolioHoldings = readPortfolioHoldings();
   const checklistStatus = readChecklistStatus();
   const economicEvents = readEconomicEvents();
+  const calendarState = readCalendarState();
 
   const data = {};
   if (scope === "full" || scope === "manual") {
@@ -2571,6 +2759,7 @@ function buildBackupPayload(scope = "full") {
     data.weeklyReviews = weeklyReviews;
     data.checklistStatus = checklistStatus;
     data.economicEvents = economicEvents;
+    data.calendarState = calendarState;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -2635,6 +2824,11 @@ function restoreBackupPayload(payload) {
   if (Array.isArray(data.economicEvents)) {
     writeEconomicEvents(data.economicEvents);
     restored.push("경제 이벤트 캘린더");
+  }
+
+  if (data.calendarState && typeof data.calendarState === "object" && !Array.isArray(data.calendarState)) {
+    writeCalendarState(data.calendarState);
+    restored.push("캘린더 선택 상태");
   }
 
   if (!restored.length) {
@@ -2722,6 +2916,7 @@ function setupBackupHandlers() {
       localStorage.removeItem(PORTFOLIO_STORAGE_KEY);
       localStorage.removeItem(CHECKLIST_STORAGE_KEY);
       localStorage.removeItem(ECONOMIC_EVENTS_STORAGE_KEY);
+      localStorage.removeItem(CALENDAR_STATE_STORAGE_KEY);
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -3208,6 +3403,223 @@ function injectChecklistCalendarStyles() {
       margin-top: 14px;
       display: grid;
       gap: 8px;
+    }
+
+    .full-calendar-card {
+      grid-column: 1 / -1;
+    }
+
+    .calendar-topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .calendar-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .calendar-actions button,
+    .event-jump {
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 850;
+    }
+
+    .calendar-month-label {
+      margin: 14px 0 10px;
+      font-size: 1.35rem;
+      font-weight: 950;
+      color: #ffffff;
+    }
+
+    .calendar-legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+      color: rgba(255,255,255,0.72);
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+
+    .calendar-legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .calendar-weekdays,
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .calendar-weekdays span {
+      text-align: center;
+      color: rgba(255,255,255,0.56);
+      font-size: 0.76rem;
+      font-weight: 900;
+      padding: 4px 0;
+    }
+
+    .calendar-day {
+      min-height: 92px;
+      padding: 9px;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.045);
+      color: rgba(255,255,255,0.86);
+      text-align: left;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+    }
+
+    .calendar-day:hover {
+      transform: translateY(-1px);
+      border-color: rgba(96,165,250,0.45);
+      background: rgba(59,130,246,0.10);
+    }
+
+    .calendar-day.is-out-month {
+      opacity: 0.34;
+    }
+
+    .calendar-day.is-today {
+      border-color: rgba(74,222,128,0.50);
+      box-shadow: 0 0 0 1px rgba(74,222,128,0.18) inset;
+    }
+
+    .calendar-day.is-selected {
+      background: rgba(96,165,250,0.18);
+      border-color: rgba(147,197,253,0.70);
+    }
+
+    .calendar-day-number {
+      font-weight: 950;
+      font-size: 0.95rem;
+      color: #ffffff;
+    }
+
+    .calendar-dots {
+      min-height: 10px;
+      display: flex;
+      gap: 5px;
+      align-items: center;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      display: inline-block;
+      border-radius: 50%;
+    }
+
+    .event-dot { background: #60a5fa; }
+    .checklist-dot { background: #22c55e; }
+    .review-dot { background: #f59e0b; }
+
+    .calendar-day-mini {
+      display: inline-block;
+      width: fit-content;
+      max-width: 100%;
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: rgba(96,165,250,0.14);
+      color: rgba(219,234,254,0.98);
+      font-size: 0.70rem;
+      font-weight: 900;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .calendar-day-mini.review-mini {
+      background: rgba(245,158,11,0.16);
+      color: #fde68a;
+    }
+
+    .calendar-detail-box {
+      margin-top: 14px;
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.055);
+      border: 1px solid rgba(255,255,255,0.13);
+    }
+
+    .calendar-detail-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .calendar-detail-header strong {
+      color: #ffffff;
+      font-size: 1.05rem;
+    }
+
+    .calendar-detail-header span {
+      color: rgba(255,255,255,0.62);
+      font-weight: 850;
+      font-size: 0.82rem;
+    }
+
+    .calendar-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .calendar-checklist-row {
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(34,197,94,0.08);
+      border: 1px solid rgba(74,222,128,0.18);
+      margin-top: 8px;
+    }
+
+    .calendar-checklist-row strong {
+      display: block;
+      color: #ffffff;
+    }
+
+    .calendar-checklist-row span {
+      color: rgba(255,255,255,0.60);
+      font-size: 0.78rem;
+      font-weight: 850;
+    }
+
+    .event-jump {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 86px 1fr;
+      border-radius: 14px;
+      text-align: left;
+      background: rgba(255,255,255,0.06);
+    }
+
+    @media (max-width: 920px) {
+      .calendar-detail-grid {
+        grid-template-columns: 1fr;
+      }
+      .calendar-day {
+        min-height: 78px;
+      }
     }
 
     @media (max-width: 720px) {
