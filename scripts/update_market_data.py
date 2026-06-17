@@ -4160,6 +4160,344 @@ def update_unautomated_manual_notes(data):
             "action": item.get("action") or "주간 리서치 루틴에서 직접 확인하고, 추후 안정적인 데이터 소스가 생기면 자동화합니다.",
         })
 
+
+# -----------------------------------------------------------------------------
+# Final signal recalibration v2: volatility + employment
+# -----------------------------------------------------------------------------
+
+def to_float_or_none(value):
+    """Parse numeric values stored as number, string, comma string, or percent string."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(',', '').replace('%', '')
+    if text in ('', 'auto-pending', 'manual-required', 'source-error', 'not-applicable'):
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def set_indicator_signal(item, signal, score, interpretation=None, market_reaction=None, action=None):
+    item['signal'] = signal
+    item['score'] = score
+    if interpretation:
+        item['interpretation'] = interpretation
+    if market_reaction:
+        item['marketReaction'] = market_reaction
+    if action:
+        item['action'] = action
+
+
+def vix_change_signal_v3(change_percent, vix_spot):
+    """VIX 변화율 최종 판정.
+
+    VIX 변화율은 단독으로 긍정/부정을 정하면 안 된다. 같은 +10%라도 VIX가 11에서 12.1로 오른 것과,
+    23에서 25.3으로 오른 것은 의미가 다르다. 따라서 VIX 현물 레벨과 변화율을 같이 본다.
+    """
+    if change_percent is None:
+        return 'neutral', 0
+
+    # VIX 레벨을 모르면 변화율만으로 보수적으로 판단한다.
+    if vix_spot is None:
+        if change_percent >= 20:
+            return 'negative', -1
+        if change_percent >= 8:
+            return 'warning', 0
+        if change_percent <= -8:
+            return 'positive', 1
+        return 'neutral', 0
+
+    # 공포 레벨에서 더 상승하면 위험 신호. 급락해도 아직 공포가 높으면 즉시 긍정으로 보지 않는다.
+    if vix_spot >= 25:
+        if change_percent >= 5:
+            return 'negative', -1
+        if change_percent <= -12:
+            return 'warning', 0
+        return 'negative', -1
+
+    # VIX 20~25는 이미 긴장 구간이다. 상승은 경고/부정, 하락은 중립 개선이다.
+    if 20 <= vix_spot < 25:
+        if change_percent >= 10:
+            return 'negative', -1
+        if change_percent >= 4:
+            return 'warning', 0
+        if change_percent <= -10:
+            return 'neutral', 0
+        return 'warning', 0
+
+    # VIX 10~20은 정상 변동성 구간. 작은 변화는 노이즈, 하락은 긍정, 급등은 경고.
+    if 10 < vix_spot < 20:
+        if change_percent >= 15:
+            return 'warning', 0
+        if change_percent >= 8:
+            return 'warning', 0
+        if change_percent <= -8:
+            return 'positive', 1
+        return 'neutral', 0
+
+    # VIX가 너무 낮은 상태에서 더 하락하면 방심/과열. 상승은 정상화일 수 있어 중립.
+    if vix_spot <= 10:
+        if change_percent <= -5:
+            return 'warning', 0
+        if change_percent >= 20:
+            return 'warning', 0
+        return 'neutral', 0
+
+    return 'neutral', 0
+
+
+def initial_claims_signal_v3(value, change):
+    """신규 실업수당 최종 판정.
+
+    사용자의 골디락스 기준을 우선 반영한다: 20만~25만 건은 기본적으로 고용 안정권이다.
+    다만 한 주 만에 4만 건 이상 급증하면 긍정이 아니라 중립으로 낮춘다.
+    """
+    if value is None:
+        return 'neutral', 0
+
+    if value >= 300000:
+        return 'negative', -1
+    if value >= 275000:
+        return 'negative', -1 if (change is not None and change >= 20000) else 0
+    if value >= 250000:
+        return 'warning', 0
+
+    if 200000 <= value < 250000:
+        if change is not None and change >= 40000:
+            return 'neutral', 0
+        if change is not None and change >= 25000:
+            return 'neutral', 0
+        return 'positive', 1
+
+    # 20만 건 미만은 노동시장이 강하다는 뜻이지만, 금리 인하 기대에는 부담일 수 있어 과도한 긍정은 제한한다.
+    if 180000 <= value < 200000:
+        return 'positive', 1
+    return 'neutral', 0
+
+
+def unemployment_rate_signal_v3(value, change):
+    """실업률 최종 판정.
+
+    실업률은 후행지표다. 4.3% 전후는 경기 침체 신호라기보다 정상~둔화 경계권으로 본다.
+    수치 자체보다 0.2~0.3%p 이상의 상승 속도를 더 경계한다.
+    """
+    if value is None:
+        return 'neutral', 0
+
+    if change is not None and change >= 0.30:
+        return 'negative', -1
+    if value >= 4.9:
+        return 'negative', -1
+    if value >= 4.5:
+        return 'warning', 0
+    if change is not None and change >= 0.20:
+        return 'warning', 0
+    if 3.6 <= value <= 4.1 and (change is None or change <= 0.10):
+        return 'positive', 1
+    if 4.1 < value < 4.5:
+        return 'neutral', 0
+    if value < 3.6:
+        return 'neutral', 0
+    return 'neutral', 0
+
+
+def payrolls_signal_v3(value):
+    """비농업 고용자 수 변화 최종 판정.
+
+    단위는 천 명이다. 100k~250k는 고용이 무너지지 않으면서도 과열되지 않은 골디락스권이다.
+    """
+    if value is None:
+        return 'neutral', 0
+    if value < 50000:
+        return 'negative', -1
+    if 50000 <= value < 100000:
+        return 'warning', 0
+    if 100000 <= value <= 250000:
+        return 'positive', 1
+    if 250000 < value <= 350000:
+        return 'neutral', 0
+    return 'warning', 0
+
+
+def recalibrate_volatility_and_employment_signals(data):
+    """Override key signals after all data fetches.
+
+    This is intentionally placed at the end of the update pipeline so older provider-specific logic cannot overwrite
+    the final investment interpretation.
+    """
+    today = datetime.now(KST).date().isoformat()
+
+    # VIX change rate.
+    try:
+        vix = find_indicator(data, 'vix')
+        vix_change = find_indicator(data, 'vix_change_rate')
+        vix_value = to_float_or_none(vix.get('currentValue'))
+        change_value = to_float_or_none(vix_change.get('currentValue'))
+        if change_value is not None and vix_change.get('statusNote') not in ('source-error', 'manual-required'):
+            signal, score = vix_change_signal_v3(change_value, vix_value)
+            set_indicator_signal(
+                vix_change,
+                signal,
+                score,
+                interpretation=f"VIX 변화율은 {change_value:.2f}%입니다. 이 값은 VIX 현물 레벨 {vix_value if vix_value is not None else '확인불가'}와 함께 해석합니다.",
+                market_reaction="VIX 변화율은 공포의 확산 속도입니다. 단, 낮은 VIX에서의 작은 상승은 노이즈일 수 있고, 높은 VIX에서의 추가 상승은 위험 신호입니다.",
+                action="VIX 변화율이 경고/부정으로 바뀌면 신규 추격매수보다 포지션 크기와 손절 기준을 먼저 점검합니다.",
+            )
+            vix_change['actualDate'] = vix_change.get('actualDate') or today
+            print(f"[final-signal] vix_change_rate -> {signal}", flush=True)
+    except Exception as error:
+        print(f"[final-signal] vix_change_rate skipped: {error}", flush=True)
+
+    # Initial claims.
+    try:
+        item = find_indicator(data, 'initial_claims')
+        value = to_float_or_none(item.get('currentValue'))
+        change = to_float_or_none(item.get('change'))
+        if value is not None and item.get('statusNote') not in ('source-error', 'manual-required'):
+            signal, score = initial_claims_signal_v3(value, change)
+            set_indicator_signal(
+                item,
+                signal,
+                score,
+                interpretation=f"신규 실업수당 청구건수는 {value:,.0f}건입니다. 20만~25만 건은 고용 안정권으로 보되, 주간 급증 여부를 함께 봅니다.",
+                market_reaction="청구건수가 25만 건을 넘거나 빠르게 증가하면 고용 둔화 가능성이 커집니다. 20만~25만 건에서 안정되면 소비 체력에는 우호적입니다.",
+                action="청구건수가 25만 건 이상으로 올라가거나 2~3주 연속 증가하면 경기민감·고레버리지 비중 확대를 늦춥니다.",
+            )
+            print(f"[final-signal] initial_claims -> {signal}", flush=True)
+    except Exception as error:
+        print(f"[final-signal] initial_claims skipped: {error}", flush=True)
+
+    # Unemployment rate.
+    try:
+        item = find_indicator(data, 'unemployment_rate')
+        value = to_float_or_none(item.get('currentValue'))
+        change = to_float_or_none(item.get('change'))
+        if value is not None and item.get('statusNote') not in ('source-error', 'manual-required'):
+            signal, score = unemployment_rate_signal_v3(value, change)
+            set_indicator_signal(
+                item,
+                signal,
+                score,
+                interpretation=f"실업률은 {value:.1f}%입니다. 실업률은 후행지표이므로 절대값보다 상승 속도를 더 경계합니다.",
+                market_reaction="4.1~4.4% 구간은 둔화 경계권이지만 침체 확정 신호는 아닙니다. 4.5% 이상 또는 빠른 상승은 방어 전환 신호입니다.",
+                action="실업률이 4.5% 이상으로 올라가거나 전월 대비 0.2%p 이상 상승하면 방어주·현금 비중 점검을 강화합니다.",
+            )
+            print(f"[final-signal] unemployment_rate -> {signal}", flush=True)
+    except Exception as error:
+        print(f"[final-signal] unemployment_rate skipped: {error}", flush=True)
+
+    # Nonfarm payrolls.
+    try:
+        item = find_indicator(data, 'nonfarm_payrolls')
+        value = to_float_or_none(item.get('currentValue'))
+        if value is not None and item.get('statusNote') not in ('source-error', 'manual-required'):
+            signal, score = payrolls_signal_v3(value)
+            set_indicator_signal(
+                item,
+                signal,
+                score,
+                interpretation=f"비농업 고용자 수 변화는 {value:,.0f}천 명입니다. 10만~25만 명은 고용이 무너지지 않으면서도 과열되지 않은 골디락스권입니다.",
+                market_reaction="NFP가 10만 명 밑으로 내려가면 경기 둔화 우려가 커지고, 35만 명 이상이면 임금·금리 부담이 커질 수 있습니다.",
+                action="NFP가 골디락스권이면 고용축을 우호적으로 보되, 실업수당·실업률 악화가 동반되는지 확인합니다.",
+            )
+            print(f"[final-signal] nonfarm_payrolls -> {signal}", flush=True)
+    except Exception as error:
+        print(f"[final-signal] nonfarm_payrolls skipped: {error}", flush=True)
+
+    rebuild_volatility_axis_summary(data)
+    rebuild_employment_axis_summary(data)
+
+
+def signal_score_from_indicator(data, indicator_id):
+    try:
+        item = find_indicator(data, indicator_id)
+    except Exception:
+        return 0
+    if item.get('signal') in ('source-error', 'manual-required'):
+        return 0
+    score = item.get('score')
+    return score if is_number(score) else 0
+
+
+def status_from_indicator_group(data, ids):
+    return axis_status_from_score(sum(signal_score_from_indicator(data, i) for i in ids))
+
+
+def rebuild_volatility_axis_summary(data):
+    ids = ['vix_change_rate', 'vix', 'vix_futures_structure']
+    total_score = sum(signal_score_from_indicator(data, i) for i in ids)
+    status = axis_status_from_score(total_score)
+
+    try:
+        vix = find_indicator(data, 'vix')
+        vix_change = find_indicator(data, 'vix_change_rate')
+        futures = find_indicator(data, 'vix_futures_structure')
+    except Exception:
+        return
+
+    data.setdefault('axisSummary', {})
+    if 'volatility' in data['axisSummary']:
+        data['axisSummary']['volatility'].update({
+            'status': status,
+            'score': total_score,
+            'leadingStatus': vix_change.get('signal', 'neutral'),
+            'coincidentStatus': vix.get('signal', 'neutral'),
+            'laggingStatus': futures.get('signal', 'neutral'),
+            'summary': f"VIX {vix.get('currentValue')}, VIX 변화율 {vix_change.get('currentValue')}%, VIX 선물/만기구조 {futures.get('currentValue')}%입니다.",
+            'interpretation': '변동성 축은 VIX 현재값, 변화율, 만기구조를 함께 봅니다. VIX 10~20과 콘탱고는 정상 구조이며, VIX 상승 속도와 백워데이션 전환을 경계합니다.',
+            'action': 'VIX 변화율이 경고/부정으로 전환되거나 만기구조가 백워데이션으로 바뀌면 신규 추격매수를 제한하고 방어 조건을 점검합니다.',
+        })
+
+    if 'volatility' in data.get('matrix', {}):
+        data['matrix']['volatility'].update({
+            'leading': vix_change.get('signal', 'neutral'),
+            'coincident': vix.get('signal', 'neutral'),
+            'lagging': futures.get('signal', 'neutral'),
+        })
+
+
+def rebuild_employment_axis_summary(data):
+    ids = ['initial_claims', 'unemployment_rate', 'nonfarm_payrolls', 'average_hourly_earnings', 'ism_manufacturing_pmi']
+    total_score = sum(signal_score_from_indicator(data, i) for i in ids)
+    status = axis_status_from_score(total_score)
+
+    try:
+        initial = find_indicator(data, 'initial_claims')
+        unrate = find_indicator(data, 'unemployment_rate')
+        nfp = find_indicator(data, 'nonfarm_payrolls')
+        wage = find_indicator(data, 'average_hourly_earnings')
+        ism = find_indicator(data, 'ism_manufacturing_pmi')
+    except Exception:
+        return
+
+    leading_status = status_from_indicator_group(data, ['initial_claims', 'ism_manufacturing_pmi'])
+    coincident_status = status_from_indicator_group(data, ['nonfarm_payrolls', 'average_hourly_earnings'])
+    lagging_status = unrate.get('signal', 'neutral')
+
+    data.setdefault('axisSummary', {})
+    if 'employment' in data['axisSummary']:
+        data['axisSummary']['employment'].update({
+            'status': status,
+            'score': total_score,
+            'leadingStatus': leading_status,
+            'coincidentStatus': coincident_status,
+            'laggingStatus': lagging_status,
+            'summary': f"신규 실업수당 {initial.get('currentValue')}, 실업률 {unrate.get('currentValue')}%, NFP {nfp.get('currentValue')}천 명, 임금 {wage.get('currentValue')}%, ISM PMI {ism.get('currentValue')}입니다.",
+            'interpretation': '고용축은 선행성 있는 신규 실업수당·ISM, 동행성 있는 NFP·임금, 후행성 있는 실업률을 분리해 봅니다.',
+            'action': '신규 실업수당과 ISM이 먼저 악화되고, 이후 NFP·실업률이 따라 악화되면 방어 시나리오를 강화합니다.',
+        })
+
+    if 'employment' in data.get('matrix', {}):
+        data['matrix']['employment'].update({
+            'leading': leading_status,
+            'coincident': coincident_status,
+            'lagging': lagging_status,
+        })
+
+
 def update_meta(data):
     now = datetime.now(KST)
 
@@ -4169,11 +4507,11 @@ def update_meta(data):
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "timezone": "Asia/Seoul",
         "dataStatus": "partial-plus",
-        "automationStatus": "full-auto-broad-indicators-signal-recalibration-v1",
+        "automationStatus": "full-auto-broad-indicators-employment-volatility-final-v1",
         "sourceMode": "mixed",
         "notes": [
             "VIX, VIX 선물 구조, 금리, 고용, 자금흐름 프록시, 소비, 마진, 달러/원자재 주요 지표 자동 업데이트가 실행되었습니다.",
-            "이번 버전은 기존 자동화 지표에 더해 금리·고용·소비·달러·원자재·VIX 신호 기준을 레벨 우선 방식으로 재보정했습니다.",
+            "이번 버전은 VIX 변화율, 신규 실업수당, 실업률, 비농업 고용자 수 변화의 최종 판정 기준을 사용자의 8축 프레임에 맞춰 재보정했습니다.",
             "추가 금리 지표: 10Y-2Y 스프레드, 10년 실질금리, Effective Fed Funds Rate.",
             "추가 고용 지표: 비농업 고용자 수 변화, 시간당 평균 임금 YoY.",
             "자금흐름 축은 실제 ETF fund flow가 아니라 SPY/QQQ/IWM/SQQQ 가격 기반 프록시로 먼저 자동화했습니다.",
@@ -4218,6 +4556,7 @@ def main():
     update_all_remaining_auto_indicators(data)
     update_newly_automated_indicators(data)
     update_unautomated_manual_notes(data)
+    recalibrate_volatility_and_employment_signals(data)
     update_meta(data)
 
     assert_no_null(data)
@@ -4225,7 +4564,7 @@ def main():
     save_data(data)
 
     print("[done] broad stable-source auto indicator update completed", flush=True)
-    print("[done] latest.json should contain full-auto-broad-indicators-signal-recalibration-v1", flush=True)
+    print("[done] latest.json should contain full-auto-broad-indicators-employment-volatility-final-v1", flush=True)
 
 
 if __name__ == "__main__":
