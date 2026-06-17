@@ -83,6 +83,7 @@ const WEEKLY_REVIEW_STORAGE_KEY = "eightAxisWeeklyReviewsV1";
 const PORTFOLIO_STORAGE_KEY = "eightAxisPortfolioAllocationsV1";
 const CHECKLIST_STORAGE_KEY = "eightAxisChecklistStatusV1";
 const ECONOMIC_EVENTS_STORAGE_KEY = "eightAxisEconomicEventsV1";
+const WEEKLY_REPORT_STORAGE_KEY = "eightAxisWeeklyReportsV1";
 
 
 const MANUAL_REQUIRED_IDS = [
@@ -1968,6 +1969,21 @@ function writeEconomicEvents(events) {
   writeJsonStorage(ECONOMIC_EVENTS_STORAGE_KEY, sorted);
 }
 
+function readWeeklyReports() {
+  const reports = readJsonStorage(WEEKLY_REPORT_STORAGE_KEY, []);
+  return Array.isArray(reports) ? reports : [];
+}
+
+function writeWeeklyReports(reports) {
+  const sorted = [...reports].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  writeJsonStorage(WEEKLY_REPORT_STORAGE_KEY, sorted);
+}
+
+function latestWeeklyReport() {
+  const reports = readWeeklyReports();
+  return reports.length ? reports[reports.length - 1] : null;
+}
+
 function optionHtml(options, selected) {
   return options.map(option => `
     <option value="${escapeHtml(option.value)}" ${selected === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
@@ -2730,6 +2746,7 @@ function localDataSummary() {
   const portfolioHoldings = readPortfolioHoldings();
   const checklistStatus = readChecklistStatus();
   const economicEvents = readEconomicEvents();
+  const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
@@ -2737,6 +2754,7 @@ function localDataSummary() {
     portfolioCount: portfolioHoldings.length,
     checklistCount: Object.values(checklistStatus || {}).filter(item => item?.done).length,
     eventCount: economicEvents.length,
+    reportCount: weeklyReports.length,
     calendarMonth: calendarState.month
   };
 }
@@ -2751,6 +2769,7 @@ function buildBackupPayload(scope = "full") {
   const portfolioHoldings = readPortfolioHoldings();
   const checklistStatus = readChecklistStatus();
   const economicEvents = readEconomicEvents();
+  const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
 
   const data = {};
@@ -2759,6 +2778,7 @@ function buildBackupPayload(scope = "full") {
     data.weeklyReviews = weeklyReviews;
     data.checklistStatus = checklistStatus;
     data.economicEvents = economicEvents;
+    data.weeklyReports = weeklyReports;
     data.calendarState = calendarState;
   }
   if (scope === "full" || scope === "portfolio") {
@@ -2826,6 +2846,11 @@ function restoreBackupPayload(payload) {
     restored.push("경제 이벤트 캘린더");
   }
 
+  if (Array.isArray(data.weeklyReports)) {
+    writeWeeklyReports(data.weeklyReports);
+    restored.push("주간 시장 리포트");
+  }
+
   if (data.calendarState && typeof data.calendarState === "object" && !Array.isArray(data.calendarState)) {
     writeCalendarState(data.calendarState);
     restored.push("캘린더 선택 상태");
@@ -2855,6 +2880,7 @@ function renderBackupPanel() {
         <div><strong>${summary.portfolioCount}</strong><span>포트폴리오 자산</span></div>
         <div><strong>${summary.checklistCount}</strong><span>체크 완료</span></div>
         <div><strong>${summary.eventCount}</strong><span>경제 이벤트</span></div>
+        <div><strong>${summary.reportCount}</strong><span>시장 리포트</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -2916,6 +2942,7 @@ function setupBackupHandlers() {
       localStorage.removeItem(PORTFOLIO_STORAGE_KEY);
       localStorage.removeItem(CHECKLIST_STORAGE_KEY);
       localStorage.removeItem(ECONOMIC_EVENTS_STORAGE_KEY);
+      localStorage.removeItem(WEEKLY_REPORT_STORAGE_KEY);
       localStorage.removeItem(CALENDAR_STATE_STORAGE_KEY);
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
@@ -3001,6 +3028,366 @@ function injectBackupStyles() {
   document.head.appendChild(style);
 }
 
+
+
+function numericValueOfIndicator(data, id) {
+  const item = getIndicator(data, id);
+  const value = Number(item?.currentValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+function formatReportMetric(data, id, fallback = "확인 필요") {
+  const item = getIndicator(data, id);
+  if (!item) return fallback;
+  return `${item.name}: ${formatValue(item.currentValue, item.unit)} · ${labelStatus(item.signal)}`;
+}
+
+function newsImpactOptionsHtml(selected = "neutral") {
+  return MANUAL_SIGNAL_OPTIONS.map(option => `
+    <option value="${escapeHtml(option.value)}" ${selected === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+}
+
+function reportLengthOptionsHtml(selected = "medium") {
+  const options = [
+    { value: "short", label: "짧게 · 1페이지" },
+    { value: "medium", label: "보통 · 2페이지" },
+    { value: "long", label: "자세히 · 3페이지" }
+  ];
+  return options.map(option => `
+    <option value="${escapeHtml(option.value)}" ${selected === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+}
+
+function collectReportNewsInputs() {
+  return [1, 2, 3].map(index => ({
+    title: $(`reportNewsTitle${index}`)?.value?.trim() || "",
+    url: $(`reportNewsUrl${index}`)?.value?.trim() || "",
+    axis: $(`reportNewsAxis${index}`)?.value || "other",
+    signal: $(`reportNewsSignal${index}`)?.value || "neutral",
+    summary: $(`reportNewsSummary${index}`)?.value?.trim() || ""
+  })).filter(item => item.title || item.summary || item.url);
+}
+
+function scoreLineFromLive(live) {
+  return `긍정 ${live.axisCounts.positive}개, 중립 ${live.axisCounts.neutral}개, 부정 ${live.axisCounts.negative}개`;
+}
+
+function axisNamesByStatus(live, status) {
+  const names = live.axes.filter(axis => axis.status === status).map(axis => axis.name);
+  return names.length ? names.join(", ") : "해당 없음";
+}
+
+function buildFactSetSummary(data) {
+  const eps = getIndicator(data, "eps_beat_rate");
+  const rev = getIndicator(data, "revenue_beat_rate");
+  const epsText = eps ? formatValue(eps.currentValue, eps.unit) : "확인 필요";
+  const revText = rev ? formatValue(rev.currentValue, rev.unit) : "확인 필요";
+  const epsSignal = eps ? labelStatus(eps.signal) : "확인 필요";
+  const revSignal = rev ? labelStatus(rev.signal) : "확인 필요";
+  return `FactSet 실적 지표는 EPS Beat Rate ${epsText}(${epsSignal}), Revenue Beat Rate ${revText}(${revSignal})로 집계된다. EPS와 Revenue가 동시에 양호하면 실적의 질이 높고, EPS만 강하면 비용 통제 또는 일회성 이익 가능성을 별도로 확인해야 한다.`;
+}
+
+function buildNewsNarrative(newsItems) {
+  if (!newsItems.length) {
+    return "Investing.com 인기 뉴스 3개는 아직 입력되지 않았다. 이번 주 리포트에는 자동 지표와 FactSet 실적 지표 중심으로 판단을 작성한다.";
+  }
+  return newsItems.map((item, index) => {
+    const axisLabel = labelFromOptions(EVENT_AXIS_OPTIONS, item.axis);
+    const signal = labelStatus(item.signal);
+    const summary = item.summary || "요약 미입력";
+    const url = item.url ? ` / 링크: ${item.url}` : "";
+    return `${index + 1}) ${item.title || "제목 미입력"} — 관련 축: ${axisLabel}, 방향: ${signal}. ${summary}${url}`;
+  }).join("\n");
+}
+
+function generateWeeklyMarketReportPayload(data) {
+  const live = computeLiveAxisScore(data);
+  const newsItems = collectReportNewsInputs();
+  const date = $("reportDate")?.value || todayKoreaDate();
+  const length = $("reportLength")?.value || "medium";
+  const extraMemo = $("reportExtraMemo")?.value?.trim() || "";
+  const portfolio = normalizedPortfolioHoldings();
+  const total = portfolio.reduce((sum, item) => sum + item.amount, 0);
+  const cash = portfolio.filter(isCashAsset).reduce((sum, item) => sum + item.amount, 0);
+  const cashPct = total ? (cash / total) * 100 : 0;
+  const topHoldings = portfolio
+    .filter(item => !isCashAsset(item))
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, 5)
+    .map(item => `${item.name}${item.symbol ? `(${item.symbol})` : ""} ${total ? ((item.amount / total) * 100).toFixed(1) : "0.0"}%`)
+    .join(", ") || "입력된 투자자산 없음";
+
+  const keyPositive = live.axes.filter(axis => axis.status === "positive").slice(0, 4).map(axis => axis.name);
+  const keyNegative = live.axes.filter(axis => axis.status === "negative").slice(0, 4).map(axis => axis.name);
+  const conflict = live.conflictAxes.map(axis => axis.name).slice(0, 4);
+
+  const sections = [];
+  sections.push(`주간 시장 리포트 · ${date}`);
+  sections.push(`\n1. 한 줄 결론\n현재 시장은 ${scoreLineFromLive(live)} 기준으로 '${live.regime}'에 가깝다. 실행 바이어스는 '${live.actionBias}'이며, ${live.cashGuide}`);
+  sections.push(`\n2. 8축 신호 요약\n긍정 축: ${axisNamesByStatus(live, "positive")}\n중립 축: ${axisNamesByStatus(live, "neutral")}\n부정 축: ${axisNamesByStatus(live, "negative")}\n축 내부 충돌: ${conflict.length ? conflict.join(", ") : "뚜렷한 충돌 없음"}`);
+  sections.push(`\n3. 핵심 자동 지표\n- 금리/유동성: ${formatReportMetric(data, "us_10y_yield")}, ${formatReportMetric(data, "real_10y_yield")}, ${formatReportMetric(data, "ten_two_spread")}\n- 고용: ${formatReportMetric(data, "initial_claims")}, ${formatReportMetric(data, "unemployment_rate")}, ${formatReportMetric(data, "nonfarm_payrolls")}\n- 소비/물가: ${formatReportMetric(data, "retail_sales_yoy")}, ${formatReportMetric(data, "cpi_yoy")}, ${formatReportMetric(data, "real_retail_sales_proxy")}\n- 변동성/자금: ${formatReportMetric(data, "vix")}, ${formatReportMetric(data, "vix_futures_structure")}, ${formatReportMetric(data, "spy_flow_proxy")}, ${formatReportMetric(data, "sqqq_flow_proxy")}`);
+  sections.push(`\n4. FactSet 실적 시즌 해석\n${buildFactSetSummary(data)}`);
+  sections.push(`\n5. Investing.com 인기 뉴스 3개와 내러티브\n${buildNewsNarrative(newsItems)}`);
+
+  if (length !== "short") {
+    sections.push(`\n6. 긍정/부정/충돌 신호 해석\n긍정 신호는 ${keyPositive.length ? keyPositive.join(", ") : "제한적"}에서 나온다. 부정 또는 경계 신호는 ${keyNegative.length ? keyNegative.join(", ") : "제한적"}에서 나온다. 현재 판단의 핵심은 단일 지표가 아니라 금리, 실적, 고용, 소비, 변동성 축이 같은 방향으로 움직이는지 여부다. 뉴스 내러티브가 강해도 8축 지표가 뒷받침하지 않으면 추격은 제한한다.`);
+    sections.push(`\n7. 포트폴리오 대응\n현재 입력된 포트폴리오 기준 현금 비중은 ${cashPct.toFixed(1)}%다. 상위 보유 자산은 ${topHoldings}이다. 시장이 위험자산 우호이면 현금 20~30%를 유지하며 상대강도 높은 자산을 분할 증액하고, 혼조이면 현금 30~45%, 방어 우선이면 45~60% 이상을 검토한다.`);
+  }
+
+  if (length === "long") {
+    const upcoming = readEconomicEvents().filter(event => String(event.date || "") >= date).slice(0, 8);
+    const upcomingText = upcoming.length ? upcoming.map(event => `- ${event.date} ${event.title} · ${labelFromOptions(EVENT_COUNTRY_OPTIONS, event.country)} · ${labelFromOptions(EVENT_AXIS_OPTIONS, event.axis)} · 중요도 ${labelFromOptions(EVENT_IMPORTANCE_OPTIONS, event.importance)}`).join("\n") : "등록된 다음 주 이벤트가 없습니다.";
+    sections.push(`\n8. 다음 주 확인할 이벤트\n${upcomingText}`);
+    sections.push(`\n9. 다음 주 전환 신호\n공격 전환은 긍정 축 4개 이상 유지, VIX 안정, EPS/Revenue beat 동시 양호, SQQQ 약세가 같이 확인될 때 우선한다. 방어 전환은 부정 축 4개 이상, VIX 급등, 실질금리 재상승, 고용 악화, 소비 프록시 음전환이 동시에 나타날 때 고려한다.`);
+  }
+
+  if (extraMemo) {
+    sections.push(`\n추가 메모\n${extraMemo}`);
+  }
+
+  const reportText = sections.join("\n");
+  return {
+    id: `report-${Date.now()}`,
+    date,
+    length,
+    createdAt: new Date().toISOString(),
+    axisCounts: live.axisCounts,
+    regime: live.regime,
+    actionBias: live.actionBias,
+    cashGuide: live.cashGuide,
+    newsItems,
+    reportText
+  };
+}
+
+function renderSavedReportsList() {
+  const reports = readWeeklyReports().slice().reverse();
+  if (!reports.length) return `<p class="muted">저장된 주간 리포트가 없습니다.</p>`;
+  return reports.slice(0, 8).map(report => `
+    <div class="weekly-report-saved-row">
+      <button type="button" class="report-load" data-report-load="${escapeHtml(report.id)}">
+        <strong>${escapeHtml(report.date)} · ${escapeHtml(report.regime || "시장 리포트")}</strong>
+        <span>${escapeHtml(report.actionBias || "대응 미기록")} · ${escapeHtml(report.length || "medium")}</span>
+      </button>
+      <button type="button" class="portfolio-delete" data-report-delete="${escapeHtml(report.id)}">삭제</button>
+    </div>
+  `).join("");
+}
+
+function renderWeeklyReportPanel(data) {
+  const last = latestWeeklyReport();
+  return `
+    <section class="weekly-report-panel">
+      <div class="manual-panel-header">
+        <div>
+          <h3>FactSet + Investing.com + 8축 주간 리포트</h3>
+          <p class="muted">FactSet 실적 지표와 8축 자동 신호를 바탕으로, Investing.com 인기 뉴스 3개를 직접 입력해 1~3페이지 시장 판단문을 생성합니다.</p>
+        </div>
+        ${badge("manual-updated", "리포트 저장")}
+      </div>
+      <div class="review-grid">
+        <label><span>리포트 날짜</span><input class="manual-input" type="date" id="reportDate" value="${escapeHtml(todayKoreaDate())}" /></label>
+        <label><span>길이</span><select class="manual-input" id="reportLength">${reportLengthOptionsHtml("medium")}</select></label>
+      </div>
+      <div class="report-news-grid">
+        ${[1,2,3].map(index => `
+          <div class="report-news-card">
+            <h4>Investing.com 인기 뉴스 ${index}</h4>
+            <input class="manual-input" id="reportNewsTitle${index}" placeholder="뉴스 제목" />
+            <input class="manual-input" id="reportNewsUrl${index}" placeholder="뉴스 링크 선택 입력" />
+            <div class="report-news-selects">
+              <select class="manual-input" id="reportNewsAxis${index}">${optionHtml(EVENT_AXIS_OPTIONS, "other")}</select>
+              <select class="manual-input" id="reportNewsSignal${index}">${newsImpactOptionsHtml("neutral")}</select>
+            </div>
+            <textarea class="manual-input" id="reportNewsSummary${index}" rows="3" placeholder="핵심 요약: 시장이 무엇을 걱정/기대하는지, 8축 중 어디에 연결되는지 적기"></textarea>
+          </div>
+        `).join("")}
+      </div>
+      <label class="review-note-label"><span>추가 메모</span><textarea class="manual-input" id="reportExtraMemo" rows="3" placeholder="내 해석, 다음 주 확인 신호, 포트폴리오 대응 원칙 등"></textarea></label>
+      <div class="weekly-review-actions">
+        <button type="button" class="review-save" id="generateWeeklyReport">리포트 생성</button>
+        <button type="button" class="backup-secondary" id="copyWeeklyReport">리포트 복사</button>
+        <button type="button" class="backup-secondary" id="downloadWeeklyReport">TXT 다운로드</button>
+        <button type="button" class="review-delete" id="deleteCurrentWeeklyReport">현재 리포트 삭제</button>
+      </div>
+      <textarea class="manual-input weekly-report-output" id="weeklyReportOutput" rows="18" placeholder="리포트 생성 버튼을 누르면 여기에 결과가 표시됩니다.">${escapeHtml(last?.reportText || "")}</textarea>
+      <div class="weekly-report-saved-list">
+        <h4>저장된 리포트</h4>
+        ${renderSavedReportsList()}
+      </div>
+    </section>
+  `;
+}
+
+function setupWeeklyReportHandlers() {
+  const output = $("weeklyReportOutput");
+  const generate = $("generateWeeklyReport");
+  const copy = $("copyWeeklyReport");
+  const download = $("downloadWeeklyReport");
+  const delCurrent = $("deleteCurrentWeeklyReport");
+
+  if (generate) {
+    generate.onclick = () => {
+      const payload = generateWeeklyMarketReportPayload(APP_VIEW_DATA);
+      const reports = readWeeklyReports().filter(item => item.id !== payload.id);
+      reports.push(payload);
+      writeWeeklyReports(reports);
+      if (output) output.value = payload.reportText;
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+
+  if (copy) {
+    copy.onclick = async () => {
+      const text = output?.value || "";
+      if (!text) return alert("복사할 리포트가 없습니다.");
+      try {
+        await navigator.clipboard.writeText(text);
+        alert("리포트를 클립보드에 복사했습니다.");
+      } catch (error) {
+        alert("복사에 실패했습니다. 텍스트를 직접 선택해 복사하세요.");
+      }
+    };
+  }
+
+  if (download) {
+    download.onclick = () => {
+      const text = output?.value || "";
+      if (!text) return alert("다운로드할 리포트가 없습니다.");
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `weekly-market-report-${($("reportDate")?.value || todayKoreaDate())}.txt`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    };
+  }
+
+  if (delCurrent) {
+    delCurrent.onclick = () => {
+      const currentText = output?.value || "";
+      const reports = readWeeklyReports();
+      const target = [...reports].reverse().find(item => item.reportText === currentText) || latestWeeklyReport();
+      if (!target) return alert("삭제할 저장 리포트가 없습니다.");
+      if (!confirm(`${target.date} 리포트를 삭제할까요?`)) return;
+      writeWeeklyReports(reports.filter(item => item.id !== target.id));
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+
+  document.querySelectorAll("[data-report-load]").forEach(button => {
+    button.onclick = () => {
+      const report = readWeeklyReports().find(item => item.id === button.dataset.reportLoad);
+      if (!report) return;
+      if ($("reportDate")) $("reportDate").value = report.date || todayKoreaDate();
+      if ($("reportLength")) $("reportLength").value = report.length || "medium";
+      if (output) output.value = report.reportText || "";
+      (report.newsItems || []).slice(0,3).forEach((item, idx) => {
+        const index = idx + 1;
+        if ($(`reportNewsTitle${index}`)) $(`reportNewsTitle${index}`).value = item.title || "";
+        if ($(`reportNewsUrl${index}`)) $(`reportNewsUrl${index}`).value = item.url || "";
+        if ($(`reportNewsAxis${index}`)) $(`reportNewsAxis${index}`).value = item.axis || "other";
+        if ($(`reportNewsSignal${index}`)) $(`reportNewsSignal${index}`).value = item.signal || "neutral";
+        if ($(`reportNewsSummary${index}`)) $(`reportNewsSummary${index}`).value = item.summary || "";
+      });
+      window.scrollTo({ top: $("todoView")?.offsetTop || 0, behavior: "smooth" });
+    };
+  });
+
+  document.querySelectorAll("[data-report-delete]").forEach(button => {
+    button.onclick = () => {
+      if (!confirm("이 리포트를 삭제할까요?")) return;
+      writeWeeklyReports(readWeeklyReports().filter(item => item.id !== button.dataset.reportDelete));
+      renderAll(APP_VIEW_DATA);
+    };
+  });
+}
+
+function injectWeeklyReportStyles() {
+  if (document.getElementById("weekly-report-style")) return;
+  const style = document.createElement("style");
+  style.id = "weekly-report-style";
+  style.textContent = `
+    .weekly-report-panel {
+      margin-bottom: 22px;
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(168, 85, 247, 0.10), rgba(255, 255, 255, 0.035));
+      border: 1px solid rgba(192, 132, 252, 0.24);
+    }
+    .report-news-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .report-news-card {
+      padding: 13px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      display: grid;
+      gap: 8px;
+    }
+    .report-news-card h4 {
+      margin: 0;
+      color: #fff;
+    }
+    .report-news-selects {
+      display: grid;
+      grid-template-columns: 1fr 120px;
+      gap: 8px;
+    }
+    .weekly-report-output {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    .weekly-report-saved-list {
+      margin-top: 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .weekly-report-saved-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .report-load {
+      text-align: left;
+      border: 1px solid rgba(255,255,255,0.13);
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.06);
+      color: #fff;
+      cursor: pointer;
+    }
+    .report-load strong,
+    .report-load span {
+      display: block;
+    }
+    .report-load span {
+      margin-top: 3px;
+      color: rgba(255,255,255,0.64);
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+    @media (max-width: 920px) {
+      .report-news-grid { grid-template-columns: 1fr; }
+      .report-news-selects { grid-template-columns: 1fr; }
+      .weekly-report-saved-row { grid-template-columns: 1fr; }
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 function renderChecklistPanel() {
   const status = readChecklistStatus();
@@ -3213,6 +3600,7 @@ function renderTodo(data) {
     ${renderManualInputPanel(data)}
     ${renderWeeklyReviewPanel(data)}
     ${renderEconomicEventPanel()}
+    ${renderWeeklyReportPanel(data)}
     ${renderPortfolioPanel()}
     ${renderBackupPanel()}
     <section class="todo-section">
@@ -3232,6 +3620,7 @@ function renderTodo(data) {
   setupManualInputHandlers();
   setupWeeklyReviewHandlers();
   setupEconomicEventHandlers();
+  setupWeeklyReportHandlers();
   setupPortfolioHandlers();
   setupBackupHandlers();
 }
@@ -3646,6 +4035,7 @@ async function init() {
   injectCurrentValueStyles();
   injectBackupStyles();
   injectChecklistCalendarStyles();
+  injectWeeklyReportStyles();
 
   try {
     const response = await fetch(DATA_URL);
