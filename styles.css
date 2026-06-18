@@ -1,209 +1,343 @@
+/* =====================================================================
+   8-Axis Market Dashboard v1 Desktop Polish Patch
+   적용 위치: styles.css 파일의 맨 아래에 그대로 추가
+   목적: 기능은 유지하고 데스크톱 가독성/밀도/카드 폭만 보정
+   ===================================================================== */
+
 :root {
-  --bg: #0b1020;
-  --panel: #11182b;
-  --panel-2: #151f36;
-  --border: rgba(255, 255, 255, 0.11);
-  --text: #eef3ff;
-  --muted: #9aa8c7;
-  --positive: #37d67a;
-  --neutral: #aab5cb;
-  --negative: #ff6b6b;
-  --warning: #ffd166;
-  --manual: #8ec5ff;
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+  --content-max-desktop: 1600px;
+  --content-gutter-desktop: 56px;
 }
 
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: radial-gradient(circle at top left, #18234a 0, #0b1020 38%, #060914 100%);
-  color: var(--text);
+/* 전체 화면이 1900px 이상으로 너무 넓게 퍼지는 문제 완화 */
+.container {
+  width: min(var(--content-max-desktop), calc(100% - var(--content-gutter-desktop))) !important;
+  max-width: var(--content-max-desktop) !important;
+  padding-top: 34px !important;
+  padding-bottom: 44px !important;
 }
 
-.site-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: 24px;
-  padding: 40px clamp(18px, 4vw, 56px) 28px;
-  border-bottom: 1px solid var(--border);
+/* 상단 제목부는 유지하되 과도한 세로 낭비 축소 */
+.hero {
+  padding: 26px 28px !important;
 }
 
-.eyebrow {
-  margin: 0 0 8px;
-  color: var(--manual);
-  font-size: 12px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+.hero h1,
+h1 {
+  line-height: 1.05 !important;
 }
 
-h1, h2, h3, p { margin-top: 0; }
-h1 { margin-bottom: 10px; font-size: clamp(30px, 4vw, 52px); line-height: 1.05; }
-h2 { margin-bottom: 8px; font-size: 22px; }
-h3 { margin-bottom: 8px; font-size: 17px; }
-.subtitle, .muted, .section-head p { color: var(--muted); }
-.subtitle { margin-bottom: 0; max-width: 760px; }
-
-.meta-panel {
-  min-width: 260px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  background: rgba(17, 24, 43, 0.82);
-  color: var(--muted);
-  box-shadow: var(--shadow);
-  font-size: 13px;
+.description,
+.section-heading p,
+.muted {
+  line-height: 1.55 !important;
 }
 
-main { padding: 24px clamp(18px, 4vw, 56px) 56px; }
-
-.warning {
-  margin-bottom: 18px;
-  padding: 14px 16px;
-  border: 1px solid rgba(255, 209, 102, 0.45);
-  border-radius: 14px;
-  background: rgba(255, 209, 102, 0.09);
-  color: var(--warning);
-}
-.hidden { display: none !important; }
-
-.view-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 24px;
+/* 탭 버튼 간격 및 클릭 영역 정리 */
+.tab-list,
+.tabs,
+.nav-tabs {
+  gap: 9px !important;
+  flex-wrap: wrap !important;
 }
 
-.tab {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 10px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--muted);
-  cursor: pointer;
-}
-.tab.active {
-  background: #eaf0ff;
-  color: #10172a;
-  border-color: #eaf0ff;
-  font-weight: 700;
+.tab,
+button[data-tab],
+.view-tab {
+  min-height: 38px !important;
+  padding: 9px 15px !important;
 }
 
-.view { display: none; }
-.view.active { display: block; }
-
-.summary-grid, .axis-grid, .timing-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
+/* 8축 카드: 6열처럼 너무 촘촘하게 퍼지지 않도록 4열 중심으로 보정 */
+#axisGrid,
+.axes-grid {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(260px, 1fr)) !important;
+  gap: 18px !important;
+  align-items: start !important;
 }
 
-.card, .section-card, .axis-card, .indicator-card, .todo-item {
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  background: linear-gradient(180deg, rgba(21, 31, 54, 0.92), rgba(12, 18, 34, 0.92));
-  box-shadow: var(--shadow);
+.axis-card,
+.card,
+.indicator-card,
+.todo-section,
+.weekly-report-panel,
+.portfolio-panel,
+.checklist-panel,
+.economic-event-panel,
+.full-calendar-card {
+  border-radius: 18px !important;
 }
 
-.card, .section-card { padding: 18px; }
-.section-card { margin-top: 16px; }
-.axis-card, .indicator-card, .todo-item { padding: 18px; }
-
-.section-head { margin-bottom: 16px; }
-.section-head.split {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: center;
+.axis-card {
+  padding: 18px !important;
+  min-height: auto !important;
 }
 
-#indicatorSearch {
-  width: min(360px, 100%);
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: rgba(255,255,255,0.06);
-  color: var(--text);
+.axis-card h3,
+.card h3,
+.indicator-card h3 {
+  line-height: 1.25 !important;
 }
 
-.metric-value {
-  font-size: 30px;
-  font-weight: 800;
-  margin: 8px 0 4px;
+.axis-card p,
+.indicator-card p,
+.key-item span {
+  line-height: 1.55 !important;
 }
 
-.badge-row, .mini-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
+/* 지표 상세 카드: 한 줄에 너무 많은 카드가 들어가 가독성이 떨어지는 문제 완화 */
+#indicatorList,
+.indicator-list,
+.indicator-grid-wrap,
+.detail-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(310px, 1fr)) !important;
+  gap: 18px !important;
+  align-items: start !important;
 }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border-radius: 999px;
-  padding: 5px 9px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 12px;
-}
-.badge.positive { color: var(--positive); border-color: rgba(55,214,122,.45); background: rgba(55,214,122,.08); }
-.badge.neutral { color: var(--neutral); }
-.badge.negative { color: var(--negative); border-color: rgba(255,107,107,.45); background: rgba(255,107,107,.08); }
-.badge.warning { color: var(--warning); border-color: rgba(255,209,102,.45); background: rgba(255,209,102,.08); }
-.badge.manual-required, .badge.source-error { color: var(--manual); border-color: rgba(142,197,255,.45); background: rgba(142,197,255,.08); }
-.badge.not-applicable { opacity: .55; }
-
-.axis-card header, .indicator-card header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-  margin-bottom: 12px;
+.indicator-card {
+  padding: 17px !important;
+  min-width: 0 !important;
 }
 
-.key-list, .indicator-meta, .todo-list { display: grid; gap: 10px; }
-.key-list { margin-top: 14px; }
+.indicator-card .indicator-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 9px !important;
+}
+
+.field,
 .key-item {
-  padding: 10px;
-  border-radius: 14px;
-  background: rgba(255,255,255,.045);
-  border: 1px solid rgba(255,255,255,.07);
+  min-width: 0 !important;
 }
-.key-item strong { display: block; margin-bottom: 4px; }
-.key-item span { color: var(--muted); font-size: 13px; }
 
-.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 18px; }
-table { width: 100%; border-collapse: collapse; min-width: 720px; background: rgba(17,24,43,.82); }
-th, td { padding: 14px; border-bottom: 1px solid var(--border); text-align: left; }
-th { color: var(--muted); font-size: 13px; }
-tr:last-child td { border-bottom: 0; }
-
-.indicator-list { display: grid; gap: 14px; }
-.indicator-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
-  margin: 12px 0;
+.field strong,
+.key-item strong,
+.key-item span {
+  overflow-wrap: anywhere !important;
 }
-.field {
-  padding: 10px;
-  border-radius: 14px;
-  background: rgba(255,255,255,.045);
-  border: 1px solid rgba(255,255,255,.07);
+
+/* 현재값 상자가 좁은 카드 안에서 너무 커 보이는 문제 완화 */
+.current-value-strong {
+  min-width: 92px !important;
+  font-size: 1.26rem !important;
+  padding: 6px 10px !important;
+  border-radius: 10px !important;
 }
-.field small { display: block; color: var(--muted); margin-bottom: 3px; }
-.field strong { word-break: break-word; }
 
-.todo-item { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
-.required { color: var(--warning); font-size: 12px; }
+.current-value-inline {
+  min-width: auto !important;
+  font-size: 0.95rem !important;
+  padding: 3px 7px !important;
+}
 
-@media (max-width: 760px) {
-  .site-header { align-items: flex-start; flex-direction: column; }
-  .meta-panel { width: 100%; }
-  .section-head.split { align-items: stretch; flex-direction: column; }
+/* 선행/동행/후행 보기: 3개 카드의 균형 유지 */
+#timingGrid,
+.timing-grid {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(280px, 1fr)) !important;
+  gap: 18px !important;
+  align-items: start !important;
+}
+
+/* 주간 리포트: 입력부는 유지, 결과 박스의 과도한 빈 높이 축소 */
+.weekly-report-panel {
+  padding: 18px !important;
+}
+
+.report-news-grid {
+  grid-template-columns: repeat(3, minmax(260px, 1fr)) !important;
+  gap: 12px !important;
+}
+
+.report-news-card {
+  padding: 13px !important;
+}
+
+.weekly-report-output {
+  min-height: 280px !important;
+  max-height: 560px !important;
+  overflow: auto !important;
+  line-height: 1.58 !important;
+}
+
+/* To do / 체크리스트: 한 항목이 너무 길게 보이는 문제 완화 */
+.checklist-panel,
+.todo-section {
+  padding: 18px !important;
+}
+
+.checklist-group {
+  gap: 7px !important;
+}
+
+.checklist-row {
+  padding: 9px 12px !important;
+  min-height: 54px !important;
+}
+
+.checklist-note,
+textarea.checklist-note {
+  min-height: 46px !important;
+  height: 46px !important;
+  resize: vertical !important;
+}
+
+.checklist-main strong {
+  font-size: 0.92rem !important;
+}
+
+.checklist-main em,
+.checklist-date {
+  font-size: 0.78rem !important;
+}
+
+/* 포트폴리오: 파이차트와 보유자산 리스트의 좌우 균형 */
+.portfolio-layout {
+  grid-template-columns: minmax(320px, 0.82fr) minmax(420px, 1.18fr) !important;
+  gap: 18px !important;
+}
+
+.portfolio-pie-svg {
+  width: min(260px, 100%) !important;
+}
+
+.portfolio-chart-card {
+  padding: 14px !important;
+}
+
+.portfolio-row {
+  min-height: 58px !important;
+  padding: 10px 12px !important;
+}
+
+.portfolio-form-grid {
+  grid-template-columns: 1fr 1fr 1fr !important;
+  gap: 10px !important;
+}
+
+/* 월간 캘린더: 현재 구조가 좋으므로 밀도만 소폭 조정 */
+.full-calendar-card {
+  padding: 20px !important;
+}
+
+.calendar-grid,
+.calendar-weekdays {
+  gap: 8px !important;
+}
+
+.calendar-day {
+  min-height: 86px !important;
+  padding: 9px !important;
+}
+
+.calendar-month-label {
+  font-size: 1.25rem !important;
+}
+
+.calendar-day-mini {
+  max-width: 92% !important;
+}
+
+/* 긴 문장이 좁은 카드에서 세로로 과하게 잘리는 문제 완화 */
+.goldilocks-zone,
+.goldilocks-text,
+.interpretation,
+.axis-summary,
+.scenario-card,
+.calendar-detail-box {
+  overflow-wrap: anywhere !important;
+  word-break: keep-all !important;
+}
+
+/* 버튼 줄 정렬 */
+.manual-actions,
+.weekly-review-actions,
+.portfolio-actions,
+.backup-actions,
+.calendar-actions {
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+button,
+.manual-save,
+.manual-clear,
+.review-save,
+.review-delete,
+.portfolio-save,
+.portfolio-cancel,
+.portfolio-clear,
+.portfolio-edit,
+.portfolio-delete,
+.backup-actions button,
+.calendar-actions button {
+  white-space: nowrap !important;
+}
+
+/* 1440px 전후 노트북/맥북 대응 */
+@media (max-width: 1500px) {
+  :root {
+    --content-max-desktop: 1360px;
+    --content-gutter-desktop: 42px;
+  }
+
+  #axisGrid,
+  .axes-grid {
+    grid-template-columns: repeat(3, minmax(260px, 1fr)) !important;
+  }
+
+  #indicatorList,
+  .indicator-list,
+  .indicator-grid-wrap,
+  .detail-grid {
+    grid-template-columns: repeat(2, minmax(300px, 1fr)) !important;
+  }
+
+  .report-news-grid {
+    grid-template-columns: repeat(2, minmax(260px, 1fr)) !important;
+  }
+}
+
+/* 태블릿/작은 노트북 */
+@media (max-width: 1100px) {
+  #axisGrid,
+  .axes-grid,
+  #timingGrid,
+  .timing-grid,
+  #indicatorList,
+  .indicator-list,
+  .indicator-grid-wrap,
+  .detail-grid,
+  .report-news-grid,
+  .portfolio-layout {
+    grid-template-columns: 1fr !important;
+  }
+
+  .indicator-card .indicator-grid,
+  .portfolio-form-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .weekly-report-output {
+    min-height: 240px !important;
+  }
+}
+
+/* 모바일은 추후 실제 캡처 기준으로 별도 보정 예정 */
+@media (max-width: 720px) {
+  .container {
+    width: calc(100% - 24px) !important;
+    padding-top: 22px !important;
+  }
+
+  .hero {
+    padding: 20px !important;
+  }
+
+  .calendar-day {
+    min-height: 72px !important;
+    padding: 7px !important;
+  }
 }
