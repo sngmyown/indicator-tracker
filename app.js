@@ -2552,10 +2552,21 @@ function setupWeeklyReviewHandlers() {
 }
 
 function isCashAsset(item) {
-  const t = String(item.type || "").toLowerCase();
-  const symbol = String(item.symbol || "").toUpperCase();
-  const name = String(item.name || "");
-  return t.includes("cash") || symbol === "CASH" || name.includes("현금");
+  const raw = [item?.type, item?.symbol, item?.name].map(value => String(value || "").trim()).join(" ");
+  const lower = raw.toLowerCase();
+  const upper = raw.toUpperCase();
+  return (
+    lower.includes("cash") ||
+    upper.includes("CASH") ||
+    upper.includes("USD") ||
+    upper.includes("KRW") ||
+    raw.includes("현금") ||
+    raw.includes("예수금") ||
+    raw.includes("원화") ||
+    raw.includes("달러") ||
+    raw.includes("대기자금") ||
+    raw.includes("MMF")
+  );
 }
 
 const PORTFOLIO_BASIS_STORAGE_KEY = "eightAxisPortfolioBasisModeV1";
@@ -2570,22 +2581,51 @@ function writePortfolioBasisMode(mode) {
 }
 
 function parsePortfolioNumber(value) {
-  const numeric = Number(String(value ?? "0").replaceAll(",", ""));
+  const raw = String(value ?? "0").trim();
+  if (!raw) return 0;
+
+  let text = raw
+    .replace(/[₩$%원\s]/g, "")
+    .replace(/,/g, "")
+    .replace(/＋/g, "+")
+    .replace(/－/g, "-");
+
+  const negative = text.startsWith("-");
+  text = text.replace(/^[-+]/, "");
+
+  // Korean unit support: 3억 5000만, 250만, 1.2억, 100만원
+  let total = 0;
+  const eokMatch = text.match(/([0-9.]+)억/);
+  if (eokMatch) total += Number(eokMatch[1]) * 100000000;
+  const manMatch = text.match(/([0-9.]+)만/);
+  if (manMatch) total += Number(manMatch[1]) * 10000;
+
+  if (total === 0) {
+    const numericText = text.replace(/[^0-9.]/g, "");
+    total = Number(numericText || "0");
+  }
+
+  const numeric = negative ? -total : total;
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
 function normalizedPortfolioHoldings() {
   return readPortfolioHoldings()
     .map((item, index) => {
-      const currentAmount = parsePortfolioNumber(item.currentAmount ?? item.amount);
+      const name = String(item.name || item.symbol || "자산");
+      const symbol = String(item.symbol || "").toUpperCase();
+      const type = String(item.type || "주식/ETF");
+      const rawCurrentAmount = parsePortfolioNumber(item.currentAmount ?? item.amount);
       const principalAmountRaw = parsePortfolioNumber(item.principalAmount);
-      const principalAmount = principalAmountRaw > 0 ? principalAmountRaw : currentAmount;
+      const principalAmount = principalAmountRaw > 0 ? principalAmountRaw : rawCurrentAmount;
+      const cashLike = isCashAsset({ name, symbol, type });
+      const currentAmount = rawCurrentAmount > 0 ? rawCurrentAmount : (cashLike && principalAmount > 0 ? principalAmount : rawCurrentAmount);
       const targetPctRaw = parsePortfolioNumber(item.targetPct);
       return {
         id: item.id || `asset-${index}`,
-        name: String(item.name || item.symbol || "자산"),
-        symbol: String(item.symbol || "").toUpperCase(),
-        type: String(item.type || "주식/ETF"),
+        name,
+        symbol,
+        type,
         amount: currentAmount,
         currentAmount,
         principalAmount,
@@ -2883,8 +2923,10 @@ function portfolioFormPayload() {
   const name = $("portfolioName")?.value.trim() || "자산";
   const symbol = $("portfolioSymbol")?.value.trim().toUpperCase() || "";
   const type = $("portfolioType")?.value.trim() || (symbol === "CASH" || name.includes("현금") ? "현금" : "주식/ETF");
-  const amount = parsePortfolioNumber($("portfolioAmount")?.value || "0");
+  const rawAmount = parsePortfolioNumber($("portfolioAmount")?.value || "0");
   const principalInput = parsePortfolioNumber($("portfolioPrincipal")?.value || "0");
+  const cashLike = isCashAsset({ name, symbol, type });
+  const amount = rawAmount > 0 ? rawAmount : (cashLike && principalInput > 0 ? principalInput : rawAmount);
   const principalAmount = principalInput > 0 ? principalInput : amount;
   const targetPct = Math.max(0, parsePortfolioNumber($("portfolioTargetPct")?.value || "0"));
   const logoUrl = $("portfolioLogo")?.value.trim() || "";
@@ -2948,7 +2990,11 @@ function setupPortfolioHandlers() {
   if (add) {
     add.onclick = () => {
       const payload = portfolioFormPayload();
-      if (!Number.isFinite(payload.currentAmount) || payload.currentAmount <= 0) return;
+      if ((!Number.isFinite(payload.currentAmount) || payload.currentAmount <= 0) && (!Number.isFinite(payload.principalAmount) || payload.principalAmount <= 0)) return;
+      if (payload.currentAmount <= 0 && payload.principalAmount > 0) {
+        payload.currentAmount = payload.principalAmount;
+        payload.amount = payload.principalAmount;
+      }
       const editId = $("portfolioEditId")?.value || "";
       const holdings = readPortfolioHoldings();
       if (editId) {
