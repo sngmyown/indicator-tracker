@@ -2432,8 +2432,8 @@ function renderWeeklyReviewCalendar() {
 
 function renderPortfolioOverviewCard() {
   const holdings = normalizedPortfolioHoldings();
-  const total = holdings.reduce((sum, item) => sum + item.amount, 0);
-  const cash = holdings.filter(item => isCashAsset(item)).reduce((sum, item) => sum + item.amount, 0);
+  const total = portfolioCurrentTotal(holdings);
+  const cash = holdings.filter(item => isCashAsset(item)).reduce((sum, item) => sum + portfolioBasisAmount(item, "market"), 0);
   const invested = Math.max(0, total - cash);
   const cashPct = total ? (cash / total) * 100 : 0;
   const investedPct = total ? (invested / total) * 100 : 0;
@@ -2581,6 +2581,7 @@ function writePortfolioBasisMode(mode) {
 }
 
 function parsePortfolioNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
   const raw = String(value ?? "0").trim();
   if (!raw) return 0;
 
@@ -2609,17 +2610,67 @@ function parsePortfolioNumber(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function firstPositivePortfolioNumber(values = []) {
+  for (const value of values) {
+    const parsed = parsePortfolioNumber(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function maxPositivePortfolioNumber(values = []) {
+  return values.reduce((max, value) => {
+    const parsed = parsePortfolioNumber(value);
+    return Number.isFinite(parsed) && parsed > max ? parsed : max;
+  }, 0);
+}
+
 function normalizedPortfolioHoldings() {
   return readPortfolioHoldings()
     .map((item, index) => {
       const name = String(item.name || item.symbol || "자산");
       const symbol = String(item.symbol || "").toUpperCase();
       const type = String(item.type || "주식/ETF");
-      const rawCurrentAmount = parsePortfolioNumber(item.currentAmount ?? item.amount);
-      const principalAmountRaw = parsePortfolioNumber(item.principalAmount);
-      const principalAmount = principalAmountRaw > 0 ? principalAmountRaw : rawCurrentAmount;
       const cashLike = isCashAsset({ name, symbol, type });
-      const currentAmount = rawCurrentAmount > 0 ? rawCurrentAmount : (cashLike && principalAmount > 0 ? principalAmount : rawCurrentAmount);
+
+      const currentCandidates = [
+        item.currentAmount,
+        item.amount,
+        item.marketAmount,
+        item.marketValue,
+        item.currentValue,
+        item.evaluationAmount,
+        item.value,
+        item.balance,
+        item.cashAmount,
+        item.cashBalance
+      ];
+      const principalCandidates = [
+        item.principalAmount,
+        item.costAmount,
+        item.originalAmount,
+        item.initialAmount,
+        item.costBasis,
+        item.investedAmount,
+        item.purchaseAmount,
+        item.amount
+      ];
+
+      let currentAmount = firstPositivePortfolioNumber(currentCandidates);
+      let principalAmount = firstPositivePortfolioNumber(principalCandidates);
+
+      // 현금성 자산은 원금과 평가금액의 경제적 의미가 거의 같으므로,
+      // 둘 중 하나만 입력되어도 양쪽 계산에 반드시 포함한다.
+      if (cashLike) {
+        const cashAmount = maxPositivePortfolioNumber([...currentCandidates, ...principalCandidates]);
+        if (currentAmount <= 0 && cashAmount > 0) currentAmount = cashAmount;
+        if (principalAmount <= 0 && cashAmount > 0) principalAmount = cashAmount;
+      }
+
+      // 일반 자산도 한쪽 금액만 입력된 경우 파이차트에서 누락되지 않도록 보수적으로 보정한다.
+      if (currentAmount <= 0 && principalAmount > 0) currentAmount = principalAmount;
+      if (principalAmount <= 0 && currentAmount > 0) principalAmount = currentAmount;
+
       const targetPctRaw = parsePortfolioNumber(item.targetPct);
       return {
         id: item.id || `asset-${index}`,
@@ -2633,11 +2684,14 @@ function normalizedPortfolioHoldings() {
         logoUrl: String(item.logoUrl || "")
       };
     })
-    .filter(item => item.currentAmount > 0 || item.principalAmount > 0);
+    .filter(item => portfolioBasisAmount(item, "market") > 0 || portfolioBasisAmount(item, "principal") > 0);
 }
 
 function portfolioBasisAmount(item, mode = readPortfolioBasisMode()) {
-  return mode === "principal" ? item.principalAmount : item.currentAmount;
+  const current = Number(item?.currentAmount || item?.amount || 0);
+  const principal = Number(item?.principalAmount || 0);
+  if (mode === "principal") return principal > 0 ? principal : current;
+  return current > 0 ? current : principal;
 }
 
 function portfolioModeLabel(mode = readPortfolioBasisMode()) {
@@ -2645,16 +2699,18 @@ function portfolioModeLabel(mode = readPortfolioBasisMode()) {
 }
 
 function portfolioReturnPct(item) {
-  if (!item.principalAmount) return null;
-  return ((item.currentAmount - item.principalAmount) / item.principalAmount) * 100;
+  const principal = portfolioBasisAmount(item, "principal");
+  const current = portfolioBasisAmount(item, "market");
+  if (!principal) return null;
+  return ((current - principal) / principal) * 100;
 }
 
 function portfolioCurrentTotal(holdings = normalizedPortfolioHoldings()) {
-  return holdings.reduce((sum, item) => sum + item.currentAmount, 0);
+  return holdings.reduce((sum, item) => sum + portfolioBasisAmount(item, "market"), 0);
 }
 
 function portfolioPrincipalTotal(holdings = normalizedPortfolioHoldings()) {
-  return holdings.reduce((sum, item) => sum + item.principalAmount, 0);
+  return holdings.reduce((sum, item) => sum + portfolioBasisAmount(item, "principal"), 0);
 }
 
 function portfolioTargetTotal(holdings = normalizedPortfolioHoldings()) {
@@ -2731,8 +2787,8 @@ function renderPortfolioModeToggle(mode = readPortfolioBasisMode()) {
 }
 
 function renderPortfolioMiniMetrics(item, currentTotal, principalTotal) {
-  const currentPct = currentTotal ? (item.currentAmount / currentTotal) * 100 : 0;
-  const principalPct = principalTotal ? (item.principalAmount / principalTotal) * 100 : 0;
+  const currentPct = currentTotal ? (portfolioBasisAmount(item, "market") / currentTotal) * 100 : 0;
+  const principalPct = principalTotal ? (portfolioBasisAmount(item, "principal") / principalTotal) * 100 : 0;
   const ret = portfolioReturnPct(item);
   const retText = ret === null ? "수익률 -" : `수익률 ${signedPct(ret)}`;
   const retSignal = ret === null ? "neutral" : ret >= 0 ? "positive" : "negative";
@@ -2747,39 +2803,51 @@ function renderPortfolioMiniMetrics(item, currentTotal, principalTotal) {
 function renderPortfolioRebalanceSummary(holdings = normalizedPortfolioHoldings()) {
   const total = portfolioCurrentTotal(holdings);
   if (!holdings.length || total <= 0) return "";
-  const withTargets = holdings.filter(item => Number(item.targetPct) > 0);
-  if (!withTargets.length) {
-    return `
-      <div class="portfolio-rebalance-box">
-        <strong>목표 비중 미입력</strong>
-        <p class="muted">목표 비중을 입력하면 평가금액 기준으로 초과/부족 비중과 BATNA 현금 상태를 계산합니다.</p>
-      </div>
-    `;
-  }
-
-  const rows = withTargets.map(item => {
-    const currentPct = total ? (item.currentAmount / total) * 100 : 0;
-    const diff = currentPct - item.targetPct;
-    const signal = portfolioRebalanceSignal(diff, item);
-    return { item, currentPct, diff, signal };
-  }).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
 
   const targetTotal = portfolioTargetTotal(holdings);
-  const cashRow = rows.find(row => isCashAsset(row.item));
-  const biggest = rows[0];
-  const cashWarning = cashRow && cashRow.diff < -7 ? "현금 목표 대비 부족으로 시장 조정 시 BATNA가 약해진 상태입니다." : "현금 목표 비중이 유지되면 조정 시 대응 여력이 보존됩니다.";
-  const totalWarning = Math.abs(targetTotal - 100) > 1 ? `목표 비중 합계가 ${targetTotal.toFixed(1)}%입니다. 100% 기준으로 조정이 필요합니다.` : "목표 비중 합계가 100%에 가깝습니다.";
+  const rows = holdings.map(item => {
+    const currentAmount = portfolioBasisAmount(item, "market");
+    const currentPct = total ? (currentAmount / total) * 100 : 0;
+    const hasTarget = Number(item.targetPct) > 0;
+    const diff = hasTarget ? currentPct - item.targetPct : null;
+    const signal = hasTarget ? portfolioRebalanceSignal(diff, item) : { signal: "neutral", label: "목표 없음", memo: "목표 비중 미입력" };
+    return { item, currentAmount, currentPct, hasTarget, diff, signal };
+  }).sort((a, b) => {
+    const ad = a.diff === null ? 0 : Math.abs(a.diff);
+    const bd = b.diff === null ? 0 : Math.abs(b.diff);
+    return bd - ad;
+  });
+
+  const cashRows = rows.filter(row => isCashAsset(row.item));
+  const cashCurrent = cashRows.reduce((sum, row) => sum + row.currentAmount, 0);
+  const cashPct = total ? (cashCurrent / total) * 100 : 0;
+  const cashTarget = cashRows.reduce((sum, row) => sum + (Number(row.item.targetPct) || 0), 0);
+  const cashHasTarget = cashTarget > 0;
+  const cashDiff = cashHasTarget ? cashPct - cashTarget : null;
+
+  const targetRows = rows.filter(row => row.hasTarget);
+  const biggest = targetRows[0];
+  const totalWarning = Math.abs(targetTotal - 100) > 1
+    ? `목표 비중 합계가 ${targetTotal.toFixed(1)}%입니다. 100% 기준으로 조정이 필요합니다.`
+    : "목표 비중 합계가 100%에 가깝습니다.";
+  const cashWarning = !cashRows.length
+    ? "현금 항목이 입력되지 않았습니다. 시장과의 협상력 판단이 빠질 수 있습니다."
+    : !cashHasTarget
+      ? `현금은 현재 ${cashPct.toFixed(1)}%로 계산에 포함되어 있으나, 목표 현금 비중은 아직 없습니다.`
+      : cashDiff < -7
+        ? "현금 목표 대비 부족으로 시장 조정 시 BATNA가 약해진 상태입니다."
+        : "현금 목표 비중이 유지되면 조정 시 대응 여력이 보존됩니다.";
 
   return `
     <div class="portfolio-rebalance-box">
       <strong>리밸런싱 요약</strong>
-      <p class="muted">평가금액 기준으로 목표 비중과 현재 노출을 비교합니다. ${escapeHtml(totalWarning)} ${escapeHtml(cashWarning)}</p>
-      ${biggest ? `<p class="muted">가장 큰 차이는 <strong>${escapeHtml(biggest.item.name)}</strong> ${signedPp(biggest.diff)}입니다. 판단: ${escapeHtml(biggest.signal.label)}.</p>` : ""}
+      <p class="muted">평가금액 기준 총액 ${formatCurrency(total)}에 현금 ${formatCurrency(cashCurrent)}(${cashPct.toFixed(1)}%)를 포함해 계산합니다. ${escapeHtml(totalWarning)} ${escapeHtml(cashWarning)}</p>
+      ${biggest ? `<p class="muted">목표가 입력된 자산 중 가장 큰 차이는 <strong>${escapeHtml(biggest.item.name)}</strong> ${signedPp(biggest.diff)}입니다. 판단: ${escapeHtml(biggest.signal.label)}.</p>` : `<p class="muted">목표 비중을 입력하면 초과/부족 비중을 자동 계산합니다. 목표가 없어도 현재 비중 계산에는 포함됩니다.</p>`}
       <div class="portfolio-rebalance-list">
-        ${rows.slice(0, 6).map(row => `
+        ${rows.slice(0, 8).map(row => `
           <div class="portfolio-rebalance-row">
-            <span>${escapeHtml(row.item.name)} · ${signedPp(row.diff)}</span>
-            <span>${escapeHtml(row.signal.label)} · 현재 ${row.currentPct.toFixed(1)}% / 목표 ${row.item.targetPct.toFixed(1)}%</span>
+            <span>${escapeHtml(row.item.name)} · 현재 ${row.currentPct.toFixed(1)}%</span>
+            <span>${row.hasTarget ? `${escapeHtml(row.signal.label)} · 목표 ${row.item.targetPct.toFixed(1)}% / 차이 ${signedPp(row.diff)}` : "목표 없음 · 현재 비중에는 포함"}</span>
           </div>
         `).join("")}
       </div>
@@ -2790,27 +2858,32 @@ function renderPortfolioRebalanceSummary(holdings = normalizedPortfolioHoldings(
 function renderPortfolioChart() {
   const holdings = normalizedPortfolioHoldings();
   const mode = readPortfolioBasisMode();
-  const total = holdings.reduce((sum, item) => sum + portfolioBasisAmount(item, mode), 0);
+  const chartHoldings = holdings.filter(item => portfolioBasisAmount(item, mode) > 0);
+  const total = chartHoldings.reduce((sum, item) => sum + portfolioBasisAmount(item, mode), 0);
   const currentTotal = portfolioCurrentTotal(holdings);
   const principalTotal = portfolioPrincipalTotal(holdings);
-  if (!holdings.length || total <= 0) {
+  if (!chartHoldings.length || total <= 0) {
     return `<p class="muted">포트폴리오 자산을 입력하면 파이 차트가 표시됩니다.</p>`;
   }
 
   let angle = 0;
-  const slices = holdings.map((item, index) => {
+  const slices = chartHoldings.map((item, index) => {
     const amount = portfolioBasisAmount(item, mode);
     const pct = total ? (amount / total) * 100 : 0;
     const nextAngle = angle + pct * 3.6;
-    const path = describeArc(100, 100, 88, angle, nextAngle);
+    const path = pct >= 99.999
+      ? `M 100 100 m -88 0 a 88 88 0 1 0 176 0 a 88 88 0 1 0 -176 0`
+      : describeArc(100, 100, 88, angle, nextAngle);
     const html = `<path class="portfolio-slice" d="${path}" fill="${portfolioColor(index)}" data-portfolio-index="${index}"></path>`;
     angle = nextAngle;
     return html;
   }).join("");
 
-  const first = holdings[0];
+  const first = chartHoldings[0];
   const firstAmount = portfolioBasisAmount(first, mode);
   const firstPct = total ? ((firstAmount / total) * 100).toFixed(1) : "0.0";
+  const cashAmount = chartHoldings.filter(item => isCashAsset(item)).reduce((sum, item) => sum + portfolioBasisAmount(item, mode), 0);
+  const cashPct = total ? (cashAmount / total) * 100 : 0;
 
   return `
     ${renderPortfolioModeToggle(mode)}
@@ -2819,24 +2892,25 @@ function renderPortfolioChart() {
         <svg class="portfolio-pie-svg" viewBox="0 0 200 200" role="img" aria-label="portfolio allocation pie chart">
           ${slices}
           <circle cx="100" cy="100" r="48" fill="rgba(15, 23, 42, 0.92)" stroke="rgba(255,255,255,0.12)" />
-          <text x="100" y="88" class="portfolio-center-label" font-size="12">${escapeHtml(portfolioModeLabel(mode))}</text>
-          <text x="100" y="108" class="portfolio-center-label" font-size="12">${escapeHtml(formatCurrency(total))}</text>
-          <text x="100" y="125" class="portfolio-center-label" font-size="9">총 평가 ${escapeHtml(formatCurrency(currentTotal))}</text>
+          <text x="100" y="82" class="portfolio-center-label" font-size="12">${escapeHtml(portfolioModeLabel(mode))}</text>
+          <text x="100" y="102" class="portfolio-center-label" font-size="12">${escapeHtml(formatCurrency(total))}</text>
+          <text x="100" y="119" class="portfolio-center-label" font-size="9">현금 ${cashPct.toFixed(1)}%</text>
+          <text x="100" y="133" class="portfolio-center-label" font-size="8">총 평가 ${escapeHtml(formatCurrency(currentTotal))}</text>
         </svg>
         <div class="portfolio-hover-box" id="portfolioHoverBox">
           ${renderLogoElement(first)}
           <div>
             <strong>${escapeHtml(first.name)} ${first.symbol ? `(${escapeHtml(first.symbol)})` : ""}</strong><br>
             <span class="muted">${escapeHtml(first.type)} · ${portfolioModeLabel(mode)} ${formatCurrency(firstAmount)} · ${firstPct}%</span><br>
-            <span class="muted">평가 ${formatCurrency(first.currentAmount)} · 원금 ${formatCurrency(first.principalAmount)} · 목표 ${(first.targetPct || 0).toFixed(1)}%</span>
+            <span class="muted">평가 ${formatCurrency(portfolioBasisAmount(first, "market"))} · 원금 ${formatCurrency(portfolioBasisAmount(first, "principal"))} · 목표 ${(first.targetPct || 0).toFixed(1)}%</span>
           </div>
         </div>
       </div>
       <div class="portfolio-row-list">
-        ${holdings.map((item, index) => {
+        ${chartHoldings.map((item, index) => {
           const amount = portfolioBasisAmount(item, mode);
           const pct = total ? ((amount / total) * 100).toFixed(1) : "0.0";
-          const currentPct = currentTotal ? (item.currentAmount / currentTotal) * 100 : 0;
+          const currentPct = currentTotal ? (portfolioBasisAmount(item, "market") / currentTotal) * 100 : 0;
           const diff = Number(item.targetPct) > 0 ? currentPct - item.targetPct : null;
           const signal = diff === null ? null : portfolioRebalanceSignal(diff, item);
           return `
@@ -2863,8 +2937,8 @@ function renderPortfolioPanel() {
   const currentTotal = portfolioCurrentTotal(holdings);
   const principalTotal = portfolioPrincipalTotal(holdings);
   const rows = holdings.length ? holdings.map(item => {
-    const currentPct = currentTotal ? (item.currentAmount / currentTotal) * 100 : 0;
-    const principalPct = principalTotal ? (item.principalAmount / principalTotal) * 100 : 0;
+    const currentPct = currentTotal ? (portfolioBasisAmount(item, "market") / currentTotal) * 100 : 0;
+    const principalPct = principalTotal ? (portfolioBasisAmount(item, "principal") / principalTotal) * 100 : 0;
     const ret = portfolioReturnPct(item);
     return `
       <div class="portfolio-row">
@@ -2879,7 +2953,7 @@ function renderPortfolioPanel() {
             <span class="portfolio-mini-pill">목표 ${(item.targetPct || 0).toFixed(1)}%</span>
           </span>
         </span>
-        <span class="portfolio-row-amount">평가 ${formatCurrency(item.currentAmount)}<br><span class="muted">원금 ${formatCurrency(item.principalAmount)}</span></span>
+        <span class="portfolio-row-amount">평가 ${formatCurrency(portfolioBasisAmount(item, "market"))}<br><span class="muted">원금 ${formatCurrency(portfolioBasisAmount(item, "principal"))}</span></span>
         <span class="portfolio-row-actions">
           <button type="button" class="portfolio-edit" data-portfolio-edit="${escapeHtml(item.id)}">수정</button>
           <button type="button" class="portfolio-delete" data-portfolio-delete="${escapeHtml(item.id)}">삭제</button>
@@ -3042,14 +3116,15 @@ function setupPortfolioHoverHandlers() {
   if (!box) return;
   const holdings = normalizedPortfolioHoldings();
   const mode = readPortfolioBasisMode();
-  const total = holdings.reduce((sum, item) => sum + portfolioBasisAmount(item, mode), 0);
+  const chartHoldings = holdings.filter(item => portfolioBasisAmount(item, mode) > 0);
+  const total = chartHoldings.reduce((sum, item) => sum + portfolioBasisAmount(item, mode), 0);
   const currentTotal = portfolioCurrentTotal(holdings);
   const update = index => {
-    const item = holdings[Number(index)];
+    const item = chartHoldings[Number(index)];
     if (!item) return;
     const amount = portfolioBasisAmount(item, mode);
     const pct = total ? ((amount / total) * 100).toFixed(1) : "0.0";
-    const currentPct = currentTotal ? (item.currentAmount / currentTotal) * 100 : 0;
+    const currentPct = currentTotal ? (portfolioBasisAmount(item, "market") / currentTotal) * 100 : 0;
     const diff = Number(item.targetPct) > 0 ? currentPct - item.targetPct : null;
     const signal = diff === null ? null : portfolioRebalanceSignal(diff, item);
     box.innerHTML = `
@@ -3057,7 +3132,7 @@ function setupPortfolioHoverHandlers() {
       <div>
         <strong>${escapeHtml(item.name)} ${item.symbol ? `(${escapeHtml(item.symbol)})` : ""}</strong><br>
         <span class="muted">${escapeHtml(item.type)} · ${portfolioModeLabel(mode)} ${formatCurrency(amount)} · ${pct}%</span><br>
-        <span class="muted">평가 ${formatCurrency(item.currentAmount)} · 원금 ${formatCurrency(item.principalAmount)} · 목표 ${(item.targetPct || 0).toFixed(1)}%</span>${diff === null ? "" : `<br><span class="muted">목표 대비 ${signedPp(diff)} · ${escapeHtml(signal.label)}</span>`}
+        <span class="muted">평가 ${formatCurrency(portfolioBasisAmount(item, "market"))} · 원금 ${formatCurrency(portfolioBasisAmount(item, "principal"))} · 목표 ${(item.targetPct || 0).toFixed(1)}%</span>${diff === null ? "" : `<br><span class="muted">목표 대비 ${signedPp(diff)} · ${escapeHtml(signal.label)}</span>`}
       </div>
     `;
   };
@@ -3442,14 +3517,14 @@ function generateWeeklyMarketReportPayload(data) {
   const length = $("reportLength")?.value || "medium";
   const extraMemo = $("reportExtraMemo")?.value?.trim() || "";
   const portfolio = normalizedPortfolioHoldings();
-  const total = portfolio.reduce((sum, item) => sum + item.amount, 0);
-  const cash = portfolio.filter(isCashAsset).reduce((sum, item) => sum + item.amount, 0);
+  const total = portfolioCurrentTotal(portfolio);
+  const cash = portfolio.filter(isCashAsset).reduce((sum, item) => sum + portfolioBasisAmount(item, "market"), 0);
   const cashPct = total ? (cash / total) * 100 : 0;
   const topHoldings = portfolio
     .filter(item => !isCashAsset(item))
-    .sort((a, b) => b.amount - a.amount)
+    .sort((a, b) => portfolioBasisAmount(b, "market") - portfolioBasisAmount(a, "market"))
     .slice(0, 5)
-    .map(item => `${item.name}${item.symbol ? `(${item.symbol})` : ""} ${total ? ((item.amount / total) * 100).toFixed(1) : "0.0"}%`)
+    .map(item => `${item.name}${item.symbol ? `(${item.symbol})` : ""} ${total ? ((portfolioBasisAmount(item, "market") / total) * 100).toFixed(1) : "0.0"}%`)
     .join(", ") || "입력된 투자자산 없음";
 
   const keyPositive = live.axes.filter(axis => axis.status === "positive").slice(0, 4).map(axis => axis.name);
