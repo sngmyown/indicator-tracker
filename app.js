@@ -2136,6 +2136,39 @@ function renderEventBadges(event) {
 }
 
 const CALENDAR_STATE_STORAGE_KEY = "market-dashboard-calendar-state-v1";
+const MONTHLY_FOCUS_STORAGE_KEY = "market-dashboard-monthly-focus-v1";
+
+function readMonthlyFocusMap() {
+  const raw = readJsonStorage(MONTHLY_FOCUS_STORAGE_KEY, {});
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return raw;
+}
+
+function writeMonthlyFocusMap(map) {
+  const clean = {};
+  Object.entries(map || {}).forEach(([month, value]) => {
+    if (/^\d{4}-\d{2}$/.test(month) && String(value || "").trim()) {
+      clean[month] = String(value || "").trim();
+    }
+  });
+  writeJsonStorage(MONTHLY_FOCUS_STORAGE_KEY, clean);
+}
+
+function getMonthlyFocus(monthString) {
+  return String(readMonthlyFocusMap()[monthString] || "").trim();
+}
+
+function setMonthlyFocus(monthString, title) {
+  const map = readMonthlyFocusMap();
+  const cleanTitle = String(title || "").trim();
+  if (!/^\d{4}-\d{2}$/.test(monthString || "")) return;
+  if (cleanTitle) {
+    map[monthString] = cleanTitle.slice(0, 80);
+  } else {
+    delete map[monthString];
+  }
+  writeMonthlyFocusMap(map);
+}
 
 function readCalendarState() {
   const today = todayKoreaDate();
@@ -2301,6 +2334,7 @@ function renderEconomicEventCalendar() {
   const currentMonth = state.month;
   const selectedDate = state.selectedDate;
   const monthEvents = economicEventsForMonth(currentMonth);
+  const monthlyFocus = getMonthlyFocus(currentMonth);
   const upcoming = upcomingEconomicEvents(6);
   const weekdayLabels = ["일", "월", "화", "수", "목", "금", "토"];
   const upcomingList = upcoming.length ? upcoming.map(event => `
@@ -2324,7 +2358,18 @@ function renderEconomicEventCalendar() {
           <button type="button" data-calendar-shift="1">다음달</button>
         </div>
       </div>
-      <div class="calendar-month-label">${escapeHtml(monthLabel(currentMonth))}</div>
+      <div class="calendar-month-focus-row">
+        <div class="calendar-month-label">${escapeHtml(monthLabel(currentMonth))}</div>
+        <div class="calendar-month-focus-title ${monthlyFocus ? "has-focus" : "is-empty"}">
+          <span>월간 포커스</span>
+          <strong>${escapeHtml(monthlyFocus || "이번 달 핵심 이벤트/집중 주제를 입력하세요")}</strong>
+        </div>
+      </div>
+      <div class="calendar-month-focus-editor">
+        <input id="calendarMonthFocusInput" type="text" maxlength="80" value="${escapeHtml(monthlyFocus)}" placeholder="예: FOMC·CPI 확인 / M7 실적 시즌 / 방어적 리밸런싱" />
+        <button type="button" data-calendar-focus-save="1">저장</button>
+        <button type="button" data-calendar-focus-clear="1">삭제</button>
+      </div>
       <div class="calendar-legend">
         <span><i class="dot event-dot"></i> 이벤트</span>
         <span><i class="dot checklist-dot"></i> 체크리스트</span>
@@ -2372,6 +2417,36 @@ function setupEconomicCalendarOverviewHandlers() {
     todayButton.onclick = () => {
       const today = todayKoreaDate();
       writeCalendarState({ selectedDate: today, month: today.slice(0, 7) });
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+
+  const focusInput = $("calendarMonthFocusInput");
+  const saveFocus = document.querySelector("[data-calendar-focus-save]");
+  const clearFocus = document.querySelector("[data-calendar-focus-clear]");
+
+  if (saveFocus && focusInput) {
+    saveFocus.onclick = () => {
+      const state = readCalendarState();
+      setMonthlyFocus(state.month, focusInput.value);
+      renderAll(APP_VIEW_DATA);
+    };
+  }
+
+  if (focusInput) {
+    focusInput.onkeydown = event => {
+      if (event.key === "Enter") {
+        const state = readCalendarState();
+        setMonthlyFocus(state.month, focusInput.value);
+        renderAll(APP_VIEW_DATA);
+      }
+    };
+  }
+
+  if (clearFocus) {
+    clearFocus.onclick = () => {
+      const state = readCalendarState();
+      setMonthlyFocus(state.month, "");
       renderAll(APP_VIEW_DATA);
     };
   }
@@ -3154,6 +3229,7 @@ function localDataSummary() {
   const economicEvents = readEconomicEvents();
   const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
+  const monthlyFocuses = readMonthlyFocusMap();
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
     reviewCount: weeklyReviews.length,
@@ -3161,7 +3237,8 @@ function localDataSummary() {
     checklistCount: Object.values(checklistStatus || {}).filter(item => item?.done).length,
     eventCount: economicEvents.length,
     reportCount: weeklyReports.length,
-    calendarMonth: calendarState.month
+    calendarMonth: calendarState.month,
+    monthlyFocusCount: Object.keys(monthlyFocuses || {}).length
   };
 }
 
@@ -3177,6 +3254,7 @@ function buildBackupPayload(scope = "full") {
   const economicEvents = readEconomicEvents();
   const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
+  const monthlyFocuses = readMonthlyFocusMap();
 
   const data = {};
   if (scope === "full" || scope === "manual") {
@@ -3186,6 +3264,7 @@ function buildBackupPayload(scope = "full") {
     data.economicEvents = economicEvents;
     data.weeklyReports = weeklyReports;
     data.calendarState = calendarState;
+    data.monthlyFocuses = monthlyFocuses;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -3264,6 +3343,11 @@ function restoreBackupPayload(payload) {
     restored.push("캘린더 선택 상태");
   }
 
+  if (data.monthlyFocuses && typeof data.monthlyFocuses === "object" && !Array.isArray(data.monthlyFocuses)) {
+    writeMonthlyFocusMap(data.monthlyFocuses);
+    restored.push("월간 캘린더 포커스");
+  }
+
   if (!restored.length) {
     throw new Error("복원 가능한 데이터가 없습니다. manualOverrides, weeklyReviews, portfolioHoldings 중 하나가 필요합니다.");
   }
@@ -3289,6 +3373,7 @@ function renderBackupPanel() {
         <div><strong>${summary.checklistCount}</strong><span>체크 완료</span></div>
         <div><strong>${summary.eventCount}</strong><span>경제 이벤트</span></div>
         <div><strong>${summary.reportCount}</strong><span>시장 리포트</span></div>
+        <div><strong>${summary.monthlyFocusCount}</strong><span>월간 포커스</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -3353,6 +3438,7 @@ function setupBackupHandlers() {
       localStorage.removeItem(ECONOMIC_EVENTS_STORAGE_KEY);
       localStorage.removeItem(WEEKLY_REPORT_STORAGE_KEY);
       localStorage.removeItem(CALENDAR_STATE_STORAGE_KEY);
+      localStorage.removeItem(MONTHLY_FOCUS_STORAGE_KEY);
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -4239,6 +4325,78 @@ function injectChecklistCalendarStyles() {
       color: #ffffff;
     }
 
+    .calendar-month-focus-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+
+    .calendar-month-focus-row .calendar-month-label {
+      margin: 8px 0;
+    }
+
+    .calendar-month-focus-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 100%;
+      padding: 7px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(250, 204, 21, 0.26);
+      background: rgba(250, 204, 21, 0.10);
+      color: #fef3c7;
+    }
+
+    .calendar-month-focus-title span {
+      color: rgba(254, 243, 199, 0.72);
+      font-size: 0.78rem;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .calendar-month-focus-title strong {
+      color: #ffffff;
+      font-size: 0.92rem;
+      font-weight: 950;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .calendar-month-focus-title.is-empty {
+      border-color: rgba(255, 255, 255, 0.13);
+      background: rgba(255, 255, 255, 0.055);
+      color: rgba(255, 255, 255, 0.68);
+    }
+
+    .calendar-month-focus-title.is-empty strong {
+      color: rgba(255, 255, 255, 0.60);
+    }
+
+    .calendar-month-focus-editor {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      margin: 2px 0 12px;
+    }
+
+    .calendar-month-focus-editor input {
+      min-width: 0;
+    }
+
+    .calendar-month-focus-editor button {
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 850;
+    }
+
     .calendar-legend {
       display: flex;
       gap: 12px;
@@ -4412,6 +4570,10 @@ function injectChecklistCalendarStyles() {
     }
 
     @media (max-width: 920px) {
+      .calendar-month-focus-editor {
+        grid-template-columns: 1fr;
+      }
+
       .calendar-detail-grid {
         grid-template-columns: 1fr;
       }
