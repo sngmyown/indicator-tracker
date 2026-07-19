@@ -3231,6 +3231,7 @@ function localDataSummary() {
   const calendarState = readCalendarState();
   const monthlyFocuses = readMonthlyFocusMap();
   const indicatorDrawings = readIndicatorDrawings();
+  const indicatorChartRanges = readIndicatorChartRanges();
   const drawingCount = Object.values(indicatorDrawings).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0);
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
@@ -3241,7 +3242,8 @@ function localDataSummary() {
     reportCount: weeklyReports.length,
     calendarMonth: calendarState.month,
     monthlyFocusCount: Object.keys(monthlyFocuses || {}).length,
-    drawingCount
+    drawingCount,
+    chartRangeCount: Object.keys(indicatorChartRanges || {}).length
   };
 }
 
@@ -3260,6 +3262,7 @@ function buildBackupPayload(scope = "full") {
   const monthlyFocuses = readMonthlyFocusMap();
   const indicatorDrawings = readIndicatorDrawings();
   const indicatorChartState = readIndicatorChartState(APP_VIEW_DATA);
+  const indicatorChartRanges = readIndicatorChartRanges();
 
   const data = {};
   if (scope === "full" || scope === "manual") {
@@ -3272,6 +3275,7 @@ function buildBackupPayload(scope = "full") {
     data.monthlyFocuses = monthlyFocuses;
     data.indicatorDrawings = indicatorDrawings;
     data.indicatorChartState = indicatorChartState;
+    data.indicatorChartRanges = indicatorChartRanges;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -3365,6 +3369,11 @@ function restoreBackupPayload(payload) {
     restored.push("지표 차트 선택 상태");
   }
 
+  if (data.indicatorChartRanges && typeof data.indicatorChartRanges === "object" && !Array.isArray(data.indicatorChartRanges)) {
+    writeIndicatorChartRanges(data.indicatorChartRanges);
+    restored.push("지표 차트 Y축 범위");
+  }
+
   if (!restored.length) {
     throw new Error("복원 가능한 데이터가 없습니다. 수동 기록, 포트폴리오 또는 지표 작도 데이터가 필요합니다.");
   }
@@ -3392,6 +3401,7 @@ function renderBackupPanel() {
         <div><strong>${summary.reportCount}</strong><span>시장 리포트</span></div>
         <div><strong>${summary.monthlyFocusCount}</strong><span>월간 포커스</span></div>
         <div><strong>${summary.drawingCount}</strong><span>차트 작도</span></div>
+        <div><strong>${summary.chartRangeCount}</strong><span>수동 Y축 범위</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -3459,8 +3469,10 @@ function setupBackupHandlers() {
       localStorage.removeItem(MONTHLY_FOCUS_STORAGE_KEY);
       localStorage.removeItem(INDICATOR_DRAWINGS_STORAGE_KEY);
       localStorage.removeItem(INDICATOR_CHART_STATE_STORAGE_KEY);
+      localStorage.removeItem(INDICATOR_CHART_RANGE_STORAGE_KEY);
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      INDICATOR_CHART_DRAG_STATE = null;
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -4112,10 +4124,12 @@ function setupEconomicEventHandlers() {
 
 const INDICATOR_DRAWINGS_STORAGE_KEY = "eightAxisIndicatorDrawingsV1";
 const INDICATOR_CHART_STATE_STORAGE_KEY = "eightAxisIndicatorChartStateV1";
+const INDICATOR_CHART_RANGE_STORAGE_KEY = "eightAxisIndicatorChartRangesV1";
 
 let INDICATOR_CHART_RUNTIME = null;
 let INDICATOR_CHART_PENDING_POINT = null;
 let INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+let INDICATOR_CHART_DRAG_STATE = null;
 let INDICATOR_CHART_RESIZE_BOUND = false;
 
 function readIndicatorDrawings() {
@@ -4125,6 +4139,43 @@ function readIndicatorDrawings() {
 
 function writeIndicatorDrawings(drawings) {
   writeJsonStorage(INDICATOR_DRAWINGS_STORAGE_KEY, drawings || {});
+}
+
+function readIndicatorChartRanges() {
+  const ranges = readJsonStorage(INDICATOR_CHART_RANGE_STORAGE_KEY, {});
+  return ranges && typeof ranges === "object" && !Array.isArray(ranges) ? ranges : {};
+}
+
+function readIndicatorChartRange(indicatorId) {
+  const range = readIndicatorChartRanges()[indicatorId];
+  const min = Number(range?.min);
+  const max = Number(range?.max);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return null;
+  return { min, max };
+}
+
+function writeIndicatorChartRange(indicatorId, range) {
+  const ranges = readIndicatorChartRanges();
+  const min = Number(range?.min);
+  const max = Number(range?.max);
+  if (Number.isFinite(min) && Number.isFinite(max) && min < max) {
+    ranges[indicatorId] = { min, max };
+  } else {
+    delete ranges[indicatorId];
+  }
+  writeJsonStorage(INDICATOR_CHART_RANGE_STORAGE_KEY, ranges);
+}
+
+function writeIndicatorChartRanges(ranges) {
+  const clean = {};
+  Object.entries(ranges || {}).forEach(([indicatorId, range]) => {
+    const min = Number(range?.min);
+    const max = Number(range?.max);
+    if (Number.isFinite(min) && Number.isFinite(max) && min < max) {
+      clean[indicatorId] = { min, max };
+    }
+  });
+  writeJsonStorage(INDICATOR_CHART_RANGE_STORAGE_KEY, clean);
 }
 
 function readIndicatorChartState(data = APP_VIEW_DATA) {
@@ -4180,7 +4231,7 @@ function getIndicatorChartSeries(data, history, indicatorId) {
     const value = Number(item?.currentValue);
     if (!Number.isFinite(value)) return;
     rows.push({
-      time: parseChartTimestamp(snapshot.updatedAt || snapshot.date, index),
+      time: parseChartTimestamp(snapshot.date || snapshot.updatedAt, index),
       value,
       label: snapshot.date || String(snapshot.updatedAt || "").slice(0, 10) || `기록 ${index + 1}`
     });
@@ -4233,6 +4284,17 @@ function formatChartDate(timestamp) {
   }).format(date);
 }
 
+function formatChartTooltipDate(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short"
+  }).format(date);
+}
+
 function renderIndicatorChartView(data, history) {
   const panel = $("indicatorChartPanel");
   if (!panel) return;
@@ -4247,11 +4309,12 @@ function renderIndicatorChartView(data, history) {
   const selected = candidates.find(item => item.id === state.indicatorId) || candidates[0];
   const series = getIndicatorChartSeries(data, history, selected.id);
   const drawings = indicatorDrawingsFor(selected.id);
+  const yRange = readIndicatorChartRange(selected.id);
 
   panel.innerHTML = `
     <div class="indicator-chart-shell">
       <div class="indicator-chart-controls">
-        <label>
+        <label class="indicator-select-control">
           <span>지표</span>
           <select id="indicatorChartSelect">
             ${candidates.map(item => `
@@ -4262,12 +4325,31 @@ function renderIndicatorChartView(data, history) {
           </select>
         </label>
         <div class="drawing-toolbar" role="toolbar" aria-label="차트 작도 도구">
-          <button type="button" data-chart-mode="select" class="${state.mode === "select" ? "active" : ""}">선택</button>
+          <button type="button" data-chart-mode="select" class="${state.mode === "select" ? "active" : ""}">선택·이동</button>
           <button type="button" data-chart-mode="trend" class="${state.mode === "trend" ? "active" : ""}">추세선</button>
           <button type="button" data-chart-mode="horizontal" class="${state.mode === "horizontal" ? "active" : ""}">수평선</button>
           <button type="button" id="undoIndicatorDrawing" ${drawings.length ? "" : "disabled"}>마지막 취소</button>
           <button type="button" id="deleteIndicatorDrawing" ${INDICATOR_CHART_SELECTED_DRAWING_ID ? "" : "disabled"}>선택 삭제</button>
           <button type="button" id="clearIndicatorDrawings" ${drawings.length ? "" : "disabled"}>전체 삭제</button>
+        </div>
+      </div>
+
+      <div class="indicator-y-range-controls" aria-label="Y축 범위 설정">
+        <div class="indicator-y-range-inputs">
+          <label>
+            <span>Y축 최소</span>
+            <input id="indicatorYMin" type="number" step="any" value="${yRange ? escapeHtml(yRange.min) : ""}" placeholder="자동" />
+          </label>
+          <label>
+            <span>Y축 최대</span>
+            <input id="indicatorYMax" type="number" step="any" value="${yRange ? escapeHtml(yRange.max) : ""}" placeholder="자동" />
+          </label>
+        </div>
+        <div class="indicator-y-range-actions">
+          <button type="button" id="applyIndicatorYRange">직접 적용</button>
+          <button type="button" id="widenIndicatorYRange">범위 넓게</button>
+          <button type="button" id="narrowIndicatorYRange">범위 좁게</button>
+          <button type="button" id="resetIndicatorYRange" class="${yRange ? "" : "active"}">자동 맞춤</button>
         </div>
       </div>
 
@@ -4278,18 +4360,19 @@ function renderIndicatorChartView(data, history) {
         </div>
         <div>
           <strong>${formatValue(selected.currentValue, selected.unit)}</strong>
-          <span>기록 ${series.length}개 · 작도 ${drawings.length}개</span>
+          <span>기록 ${series.length}개 · 작도 ${drawings.length}개 · Y축 ${yRange ? "수동" : "자동"}</span>
         </div>
       </div>
 
       <div class="indicator-chart-stage" id="indicatorChartStage">
         <canvas id="indicatorChartCanvas" aria-label="${escapeHtml(selected.name)} 시계열 차트"></canvas>
-        <div class="indicator-chart-help" id="indicatorChartHelp"></div>
+        <div class="indicator-chart-help" id="indicatorChartHelp">값에 마우스를 올리면 날짜·요일·수치가 표시됩니다.</div>
+        <div class="indicator-chart-tooltip hidden" id="indicatorChartTooltip" role="status"></div>
       </div>
 
       <div class="indicator-chart-status">
-        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "선을 클릭하면 선택할 수 있습니다."}</span>
-        <span>작도는 이 브라우저에 자동 저장됩니다.</span>
+        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "선을 선택한 뒤 끝점 또는 수평선을 드래그해 수정하세요."}</span>
+        <span>작도와 Y축 범위는 이 브라우저에 자동 저장됩니다.</span>
       </div>
     </div>
   `;
@@ -4298,7 +4381,7 @@ function renderIndicatorChartView(data, history) {
   requestAnimationFrame(() => renderIndicatorChartCanvas(data, history, selected.id));
 }
 
-function chartCanvasGeometry(canvas, series, drawings) {
+function chartCanvasGeometry(canvas, series, drawings, manualRange = null) {
   const width = Math.max(320, canvas.clientWidth || 320);
   const height = Math.max(360, canvas.clientHeight || 360);
   const padding = { left: 72, right: 24, top: 26, bottom: 46 };
@@ -4323,16 +4406,29 @@ function chartCanvasGeometry(canvas, series, drawings) {
     if (Number.isFinite(Number(drawing.value))) values.push(Number(drawing.value));
   });
 
-  let minValue = Math.min(...values);
-  let maxValue = Math.max(...values);
-  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
-    minValue = 0;
-    maxValue = 1;
+  let minValue;
+  let maxValue;
+  if (manualRange && Number.isFinite(manualRange.min) && Number.isFinite(manualRange.max) && manualRange.min < manualRange.max) {
+    minValue = manualRange.min;
+    maxValue = manualRange.max;
+  } else {
+    minValue = Math.min(...values);
+    maxValue = Math.max(...values);
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+      minValue = 0;
+      maxValue = 1;
+    }
+    const span = maxValue - minValue;
+    const valuePadding = span > 0 ? span * 0.12 : Math.max(Math.abs(maxValue) * 0.08, 1);
+    minValue -= valuePadding;
+    maxValue += valuePadding;
   }
-  const span = maxValue - minValue;
-  const valuePadding = span > 0 ? span * 0.12 : Math.max(Math.abs(maxValue) * 0.08, 1);
-  minValue -= valuePadding;
-  maxValue += valuePadding;
+
+  if (minValue === maxValue) {
+    const fallback = Math.max(Math.abs(minValue) * 0.05, 0.01);
+    minValue -= fallback;
+    maxValue += fallback;
+  }
 
   const xToPixel = time => padding.left + ((time - minTime) / (maxTime - minTime)) * plotWidth;
   const yToPixel = value => padding.top + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
@@ -4367,15 +4463,43 @@ function resizeChartCanvas(canvas) {
   return context;
 }
 
+function activeIndicatorDrawings(indicatorId) {
+  if (INDICATOR_CHART_DRAG_STATE?.indicatorId === indicatorId) {
+    return INDICATOR_CHART_DRAG_STATE.drawings;
+  }
+  return indicatorDrawingsFor(indicatorId);
+}
+
+function drawIndicatorChartHandle(context, x, y, color = "#ffffff") {
+  context.save();
+  context.setLineDash([]);
+  context.beginPath();
+  context.arc(x, y, 6, 0, Math.PI * 2);
+  context.fillStyle = "#080d1b";
+  context.fill();
+  context.strokeStyle = color;
+  context.lineWidth = 2.5;
+  context.stroke();
+  context.restore();
+}
+
 function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = null) {
   const canvas = $("indicatorChartCanvas");
   if (!canvas) return;
 
   const series = getIndicatorChartSeries(data, history, indicatorId);
-  const drawings = indicatorDrawingsFor(indicatorId);
+  const drawings = activeIndicatorDrawings(indicatorId);
+  const selectedIndicator = getIndicator(data, indicatorId);
   const context = resizeChartCanvas(canvas);
-  const g = chartCanvasGeometry(canvas, series, drawings);
-  INDICATOR_CHART_RUNTIME = { indicatorId, series, drawings, geometry: g };
+  const g = chartCanvasGeometry(canvas, series, drawings, readIndicatorChartRange(indicatorId));
+  INDICATOR_CHART_RUNTIME = {
+    indicatorId,
+    series,
+    drawings,
+    geometry: g,
+    indicatorName: selectedIndicator?.name || indicatorId,
+    unit: selectedIndicator?.unit || ""
+  };
 
   context.clearRect(0, 0, g.width, g.height);
   context.fillStyle = "rgba(8, 13, 27, 0.96)";
@@ -4435,7 +4559,7 @@ function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = n
 
   series.forEach(row => {
     context.beginPath();
-    context.arc(g.xToPixel(row.time), g.yToPixel(row.value), 3.4, 0, Math.PI * 2);
+    context.arc(g.xToPixel(row.time), g.yToPixel(row.value), 3.8, 0, Math.PI * 2);
     context.fillStyle = "#eef3ff";
     context.fill();
     context.strokeStyle = "#8ec5ff";
@@ -4457,11 +4581,22 @@ function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = n
       context.stroke();
       context.fillStyle = selected ? "#ffffff" : "#37d67a";
       context.textAlign = "right";
-      context.fillText(formatChartValue(drawing.value), g.width - g.padding.right - 6, y - 10);
+      context.fillText(formatChartValue(drawing.value), g.width - g.padding.right - 8, y - 11);
+      if (selected) {
+        drawIndicatorChartHandle(context, g.width - g.padding.right - 10, y, "#37d67a");
+      }
     } else {
-      context.moveTo(g.xToPixel(Number(drawing.x1)), g.yToPixel(Number(drawing.y1)));
-      context.lineTo(g.xToPixel(Number(drawing.x2)), g.yToPixel(Number(drawing.y2)));
+      const x1 = g.xToPixel(Number(drawing.x1));
+      const y1 = g.yToPixel(Number(drawing.y1));
+      const x2 = g.xToPixel(Number(drawing.x2));
+      const y2 = g.yToPixel(Number(drawing.y2));
+      context.moveTo(x1, y1);
+      context.lineTo(x2, y2);
       context.stroke();
+      if (selected) {
+        drawIndicatorChartHandle(context, x1, y1, "#ffd166");
+        drawIndicatorChartHandle(context, x2, y2, "#ffd166");
+      }
     }
   });
 
@@ -4545,8 +4680,150 @@ function findNearestIndicatorDrawing(pointer, maxDistance = 10) {
   return nearestDistance <= maxDistance ? nearest : null;
 }
 
+function findNearestIndicatorDrawingHandle(pointer, maxDistance = 12) {
+  if (!INDICATOR_CHART_RUNTIME) return null;
+  const g = INDICATOR_CHART_RUNTIME.geometry;
+  const drawings = [...INDICATOR_CHART_RUNTIME.drawings].sort((a, b) => {
+    if (a.id === INDICATOR_CHART_SELECTED_DRAWING_ID) return -1;
+    if (b.id === INDICATOR_CHART_SELECTED_DRAWING_ID) return 1;
+    return 0;
+  });
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  drawings.forEach(drawing => {
+    if (drawing.type !== "trend") return;
+    [
+      { handle: "start", x: g.xToPixel(Number(drawing.x1)), y: g.yToPixel(Number(drawing.y1)) },
+      { handle: "end", x: g.xToPixel(Number(drawing.x2)), y: g.yToPixel(Number(drawing.y2)) }
+    ].forEach(candidate => {
+      const distance = Math.hypot(pointer.pixelX - candidate.x, pointer.pixelY - candidate.y);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = { drawing, handle: candidate.handle };
+      }
+    });
+  });
+
+  return nearestDistance <= maxDistance ? nearest : null;
+}
+
+function findNearestIndicatorSeriesPoint(pointer, maxDistance = 28) {
+  if (!INDICATOR_CHART_RUNTIME) return null;
+  const g = INDICATOR_CHART_RUNTIME.geometry;
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  INDICATOR_CHART_RUNTIME.series.forEach(row => {
+    const x = g.xToPixel(row.time);
+    const y = g.yToPixel(row.value);
+    const distance = Math.hypot(pointer.pixelX - x, pointer.pixelY - y);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = { row, x, y };
+    }
+  });
+
+  return nearestDistance <= maxDistance ? nearest : null;
+}
+
+function hideIndicatorChartTooltip() {
+  const tooltip = $("indicatorChartTooltip");
+  if (tooltip) tooltip.classList.add("hidden");
+}
+
+function updateIndicatorChartTooltip(pointer) {
+  const tooltip = $("indicatorChartTooltip");
+  const stage = $("indicatorChartStage");
+  if (!tooltip || !stage || INDICATOR_CHART_DRAG_STATE) return;
+
+  const nearest = findNearestIndicatorSeriesPoint(pointer);
+  if (!nearest) {
+    tooltip.classList.add("hidden");
+    return;
+  }
+
+  const unit = INDICATOR_CHART_RUNTIME?.unit || "";
+  const suffix = unit && !["index", "manual", "none"].includes(unit) ? ` ${unit}` : "";
+  tooltip.innerHTML = `
+    <strong>${escapeHtml(formatChartTooltipDate(nearest.row.time))}</strong>
+    <span>${escapeHtml(INDICATOR_CHART_RUNTIME?.indicatorName || "지표")}</span>
+    <em>${escapeHtml(formatChartValue(nearest.row.value))}${escapeHtml(suffix)}</em>
+  `;
+  tooltip.classList.remove("hidden");
+
+  const stageWidth = stage.clientWidth;
+  const stageHeight = stage.clientHeight;
+  const tooltipWidth = tooltip.offsetWidth || 180;
+  const tooltipHeight = tooltip.offsetHeight || 78;
+  const left = Math.max(8, Math.min(stageWidth - tooltipWidth - 8, nearest.x + 14));
+  const top = Math.max(8, Math.min(stageHeight - tooltipHeight - 8, nearest.y - tooltipHeight - 12));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function cloneIndicatorDrawings(drawings) {
+  return drawings.map(item => ({ ...item }));
+}
+
+function beginIndicatorDrawingDrag(canvas, event, indicatorId, pointer, target) {
+  const drawings = cloneIndicatorDrawings(indicatorDrawingsFor(indicatorId));
+  const drawing = drawings.find(item => item.id === target.drawing.id);
+  if (!drawing) return;
+
+  INDICATOR_CHART_SELECTED_DRAWING_ID = drawing.id;
+  INDICATOR_CHART_DRAG_STATE = {
+    pointerId: event.pointerId,
+    indicatorId,
+    drawingId: drawing.id,
+    type: target.type,
+    handle: target.handle || null,
+    drawings,
+    originalDrawings: cloneIndicatorDrawings(drawings),
+    valueOffset: target.type === "horizontal" ? Number(drawing.value) - pointer.value : 0
+  };
+  canvas.setPointerCapture?.(event.pointerId);
+  canvas.style.cursor = "grabbing";
+  hideIndicatorChartTooltip();
+  const deleteButton = $("deleteIndicatorDrawing");
+  if (deleteButton) deleteButton.disabled = false;
+  const status = $("indicatorChartStatus");
+  if (status) status.textContent = target.type === "horizontal" ? "수평선을 위아래로 이동 중입니다." : "추세선 끝점을 이동 중입니다.";
+  renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, indicatorId);
+}
+
+function updateIndicatorDrawingDrag(point) {
+  const drag = INDICATOR_CHART_DRAG_STATE;
+  if (!drag) return;
+  const drawing = drag.drawings.find(item => item.id === drag.drawingId);
+  if (!drawing) return;
+
+  if (drag.type === "horizontal") {
+    drawing.value = point.value + drag.valueOffset;
+  } else if (drag.handle === "start") {
+    drawing.x1 = point.time;
+    drawing.y1 = point.value;
+  } else if (drag.handle === "end") {
+    drawing.x2 = point.time;
+    drawing.y2 = point.value;
+  }
+}
+
+function finishIndicatorDrawingDrag(commit = true) {
+  const drag = INDICATOR_CHART_DRAG_STATE;
+  if (!drag) return;
+  if (commit) writeIndicatorDrawingsFor(drag.indicatorId, drag.drawings);
+  INDICATOR_CHART_DRAG_STATE = null;
+  const canvas = $("indicatorChartCanvas");
+  if (canvas) canvas.style.cursor = "default";
+  const status = $("indicatorChartStatus");
+  if (status) status.textContent = commit ? "작도 위치를 저장했습니다." : "작도 이동을 취소했습니다.";
+  renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, drag.indicatorId);
+}
+
 function refreshIndicatorChart(data = APP_VIEW_DATA, history = APP_HISTORY_DATA) {
   INDICATOR_CHART_PENDING_POINT = null;
+  INDICATOR_CHART_DRAG_STATE = null;
   renderIndicatorChartView(data, history);
 }
 
@@ -4554,6 +4831,27 @@ function addIndicatorDrawing(indicatorId, drawing) {
   const drawings = indicatorDrawingsFor(indicatorId);
   drawings.push({ id: `drawing-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...drawing });
   writeIndicatorDrawingsFor(indicatorId, drawings);
+}
+
+function currentIndicatorYRange(indicatorId) {
+  const saved = readIndicatorChartRange(indicatorId);
+  if (saved) return saved;
+  const g = INDICATOR_CHART_RUNTIME?.indicatorId === indicatorId ? INDICATOR_CHART_RUNTIME.geometry : null;
+  if (!g) return null;
+  return { min: g.minValue, max: g.maxValue };
+}
+
+function adjustIndicatorYRange(indicatorId, factor) {
+  const range = currentIndicatorYRange(indicatorId);
+  if (!range) return;
+  const center = (range.min + range.max) / 2;
+  const currentSpan = range.max - range.min;
+  const minimumSpan = Math.max(Math.abs(center) * 0.000001, 0.000001);
+  const nextSpan = Math.max(minimumSpan, currentSpan * factor);
+  writeIndicatorChartRange(indicatorId, {
+    min: center - nextSpan / 2,
+    max: center + nextSpan / 2
+  });
 }
 
 function setupIndicatorChartHandlers(data, history, indicatorId) {
@@ -4565,6 +4863,7 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
     select.onchange = () => {
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      INDICATOR_CHART_DRAG_STATE = null;
       writeIndicatorChartState({ indicatorId: select.value, mode: state.mode });
       refreshIndicatorChart(data, history);
     };
@@ -4575,8 +4874,53 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       const nextMode = button.dataset.chartMode;
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      INDICATOR_CHART_DRAG_STATE = null;
       writeIndicatorChartState({ indicatorId, mode: nextMode });
       refreshIndicatorChart(data, history);
+    };
+  });
+
+  const applyYRange = $("applyIndicatorYRange");
+  if (applyYRange) {
+    applyYRange.onclick = () => {
+      const min = Number($("indicatorYMin")?.value);
+      const max = Number($("indicatorYMax")?.value);
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+        alert("Y축 최소값과 최대값을 숫자로 입력하고, 최소값이 최대값보다 작게 설정하세요.");
+        return;
+      }
+      writeIndicatorChartRange(indicatorId, { min, max });
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  const widenYRange = $("widenIndicatorYRange");
+  if (widenYRange) {
+    widenYRange.onclick = () => {
+      adjustIndicatorYRange(indicatorId, 1.5);
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  const narrowYRange = $("narrowIndicatorYRange");
+  if (narrowYRange) {
+    narrowYRange.onclick = () => {
+      adjustIndicatorYRange(indicatorId, 1 / 1.5);
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  const resetYRange = $("resetIndicatorYRange");
+  if (resetYRange) {
+    resetYRange.onclick = () => {
+      writeIndicatorChartRange(indicatorId, null);
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  [$("indicatorYMin"), $("indicatorYMax")].filter(Boolean).forEach(input => {
+    input.onkeydown = event => {
+      if (event.key === "Enter") applyYRange?.click();
     };
   });
 
@@ -4611,6 +4955,7 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       writeIndicatorDrawingsFor(indicatorId, []);
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      INDICATOR_CHART_DRAG_STATE = null;
       refreshIndicatorChart(data, history);
     };
   }
@@ -4620,6 +4965,7 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       const point = chartPointFromPointer(canvas, event);
       if (!point) return;
       const currentState = readIndicatorChartState(data);
+      hideIndicatorChartTooltip();
 
       if (currentState.mode === "horizontal") {
         addIndicatorDrawing(indicatorId, { type: "horizontal", value: point.value });
@@ -4647,21 +4993,78 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
         return;
       }
 
+      const handle = findNearestIndicatorDrawingHandle(point);
+      if (handle) {
+        beginIndicatorDrawingDrag(canvas, event, indicatorId, point, {
+          drawing: handle.drawing,
+          type: "trend",
+          handle: handle.handle
+        });
+        return;
+      }
+
       const nearest = findNearestIndicatorDrawing(point);
       INDICATOR_CHART_SELECTED_DRAWING_ID = nearest?.id || null;
-      refreshIndicatorChart(data, history);
+      const deleteButton = $("deleteIndicatorDrawing");
+      if (deleteButton) deleteButton.disabled = !INDICATOR_CHART_SELECTED_DRAWING_ID;
+
+      if (nearest?.type === "horizontal") {
+        beginIndicatorDrawingDrag(canvas, event, indicatorId, point, {
+          drawing: nearest,
+          type: "horizontal"
+        });
+        return;
+      }
+
+      renderIndicatorChartCanvas(data, history, indicatorId);
     };
 
     canvas.onpointermove = event => {
-      if (!INDICATOR_CHART_PENDING_POINT) return;
       const point = chartPointFromPointer(canvas, event);
-      if (point) renderIndicatorChartCanvas(data, history, indicatorId, point);
+      if (!point) return;
+
+      if (INDICATOR_CHART_DRAG_STATE) {
+        updateIndicatorDrawingDrag(point);
+        renderIndicatorChartCanvas(data, history, indicatorId);
+        return;
+      }
+
+      updateIndicatorChartTooltip(point);
+
+      if (INDICATOR_CHART_PENDING_POINT) {
+        canvas.style.cursor = "crosshair";
+        renderIndicatorChartCanvas(data, history, indicatorId, point);
+        return;
+      }
+
+      const currentState = readIndicatorChartState(data);
+      if (currentState.mode !== "select") {
+        canvas.style.cursor = "crosshair";
+        return;
+      }
+
+      const handle = findNearestIndicatorDrawingHandle(point);
+      const nearest = findNearestIndicatorDrawing(point);
+      canvas.style.cursor = handle || nearest?.type === "horizontal" ? "grab" : nearest ? "pointer" : "default";
+    };
+
+    canvas.onpointerup = event => {
+      if (!INDICATOR_CHART_DRAG_STATE || INDICATOR_CHART_DRAG_STATE.pointerId !== event.pointerId) return;
+      canvas.releasePointerCapture?.(event.pointerId);
+      finishIndicatorDrawingDrag(true);
+    };
+
+    canvas.onpointercancel = event => {
+      if (!INDICATOR_CHART_DRAG_STATE || INDICATOR_CHART_DRAG_STATE.pointerId !== event.pointerId) return;
+      finishIndicatorDrawingDrag(false);
     };
 
     canvas.onpointerleave = () => {
+      hideIndicatorChartTooltip();
       if (INDICATOR_CHART_PENDING_POINT) {
         renderIndicatorChartCanvas(data, history, indicatorId, INDICATOR_CHART_PENDING_POINT);
       }
+      if (!INDICATOR_CHART_DRAG_STATE) canvas.style.cursor = "default";
     };
   }
 
@@ -4677,11 +5080,14 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
     document.addEventListener("keydown", event => {
       if (!$("chartView")?.classList.contains("active")) return;
       if (event.key === "Escape") {
+        if (INDICATOR_CHART_DRAG_STATE) finishIndicatorDrawingDrag(false);
         INDICATOR_CHART_PENDING_POINT = null;
         const chartState = readIndicatorChartState(APP_VIEW_DATA);
         renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, chartState.indicatorId);
       }
       if ((event.key === "Delete" || event.key === "Backspace") && INDICATOR_CHART_SELECTED_DRAWING_ID) {
+        const activeElement = document.activeElement;
+        if (activeElement && ["INPUT", "TEXTAREA", "SELECT"].includes(activeElement.tagName)) return;
         const chartState = readIndicatorChartState(APP_VIEW_DATA);
         writeIndicatorDrawingsFor(
           chartState.indicatorId,
@@ -4693,7 +5099,6 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
     });
   }
 }
-
 
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
