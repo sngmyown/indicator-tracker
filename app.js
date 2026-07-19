@@ -4366,12 +4366,12 @@ function renderIndicatorChartView(data, history) {
 
       <div class="indicator-chart-stage" id="indicatorChartStage">
         <canvas id="indicatorChartCanvas" aria-label="${escapeHtml(selected.name)} 시계열 차트"></canvas>
-        <div class="indicator-chart-help" id="indicatorChartHelp">값에 마우스를 올리면 날짜·요일·수치가 표시됩니다.</div>
+        <div class="indicator-chart-help" id="indicatorChartHelp">선택·이동 모드: 선 자체를 드래그해 이동하고, 추세선 끝점을 드래그해 기울기를 수정합니다.</div>
         <div class="indicator-chart-tooltip hidden" id="indicatorChartTooltip" role="status"></div>
       </div>
 
       <div class="indicator-chart-status">
-        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "선을 선택한 뒤 끝점 또는 수평선을 드래그해 수정하세요."}</span>
+        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "추세선 몸통을 드래그하면 선 전체가 이동하고, 양 끝점을 드래그하면 기울기가 수정됩니다. 수평선도 선 자체를 위아래로 드래그할 수 있습니다."}</span>
         <span>작도와 Y축 범위는 이 브라우저에 자동 저장됩니다.</span>
       </div>
     </div>
@@ -4474,12 +4474,17 @@ function drawIndicatorChartHandle(context, x, y, color = "#ffffff") {
   context.save();
   context.setLineDash([]);
   context.beginPath();
-  context.arc(x, y, 6, 0, Math.PI * 2);
+  context.arc(x, y, 7.5, 0, Math.PI * 2);
   context.fillStyle = "#080d1b";
   context.fill();
   context.strokeStyle = color;
-  context.lineWidth = 2.5;
+  context.lineWidth = 3;
   context.stroke();
+
+  context.beginPath();
+  context.arc(x, y, 2.4, 0, Math.PI * 2);
+  context.fillStyle = color;
+  context.fill();
   context.restore();
 }
 
@@ -4651,7 +4656,7 @@ function pointSegmentDistance(px, py, x1, y1, x2, y2) {
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-function findNearestIndicatorDrawing(pointer, maxDistance = 10) {
+function findNearestIndicatorDrawing(pointer, maxDistance = 15) {
   if (!INDICATOR_CHART_RUNTIME) return null;
   const g = INDICATOR_CHART_RUNTIME.geometry;
   let nearest = null;
@@ -4680,7 +4685,7 @@ function findNearestIndicatorDrawing(pointer, maxDistance = 10) {
   return nearestDistance <= maxDistance ? nearest : null;
 }
 
-function findNearestIndicatorDrawingHandle(pointer, maxDistance = 12) {
+function findNearestIndicatorDrawingHandle(pointer, maxDistance = 18) {
   if (!INDICATOR_CHART_RUNTIME) return null;
   const g = INDICATOR_CHART_RUNTIME.geometry;
   const drawings = [...INDICATOR_CHART_RUNTIME.drawings].sort((a, b) => {
@@ -4771,6 +4776,7 @@ function beginIndicatorDrawingDrag(canvas, event, indicatorId, pointer, target) 
   const drawing = drawings.find(item => item.id === target.drawing.id);
   if (!drawing) return;
 
+  const originalDrawing = { ...drawing };
   INDICATOR_CHART_SELECTED_DRAWING_ID = drawing.id;
   INDICATOR_CHART_DRAG_STATE = {
     pointerId: event.pointerId,
@@ -4780,33 +4786,81 @@ function beginIndicatorDrawingDrag(canvas, event, indicatorId, pointer, target) 
     handle: target.handle || null,
     drawings,
     originalDrawings: cloneIndicatorDrawings(drawings),
-    valueOffset: target.type === "horizontal" ? Number(drawing.value) - pointer.value : 0
+    originalDrawing,
+    startPointer: { time: pointer.time, value: pointer.value },
+    moved: false
   };
+
+  event.preventDefault();
   canvas.setPointerCapture?.(event.pointerId);
   canvas.style.cursor = "grabbing";
   hideIndicatorChartTooltip();
+
   const deleteButton = $("deleteIndicatorDrawing");
   if (deleteButton) deleteButton.disabled = false;
+
   const status = $("indicatorChartStatus");
-  if (status) status.textContent = target.type === "horizontal" ? "수평선을 위아래로 이동 중입니다." : "추세선 끝점을 이동 중입니다.";
+  if (status) {
+    if (target.type === "horizontal") {
+      status.textContent = "수평선 전체를 위아래로 이동 중입니다.";
+    } else if (target.handle === "start" || target.handle === "end") {
+      status.textContent = "추세선 끝점을 이동해 길이와 기울기를 수정 중입니다.";
+    } else {
+      status.textContent = "추세선 전체를 이동 중입니다. 기울기와 길이는 유지됩니다.";
+    }
+  }
+
   renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, indicatorId);
 }
 
 function updateIndicatorDrawingDrag(point) {
   const drag = INDICATOR_CHART_DRAG_STATE;
-  if (!drag) return;
+  if (!drag || !INDICATOR_CHART_RUNTIME) return;
+
   const drawing = drag.drawings.find(item => item.id === drag.drawingId);
   if (!drawing) return;
 
+  const original = drag.originalDrawing;
+  const g = INDICATOR_CHART_RUNTIME.geometry;
+  drag.moved = true;
+
   if (drag.type === "horizontal") {
-    drawing.value = point.value + drag.valueOffset;
-  } else if (drag.handle === "start") {
+    const deltaValue = point.value - drag.startPointer.value;
+    drawing.value = Math.max(g.minValue, Math.min(g.maxValue, Number(original.value) + deltaValue));
+    return;
+  }
+
+  if (drag.handle === "start") {
     drawing.x1 = point.time;
     drawing.y1 = point.value;
-  } else if (drag.handle === "end") {
+    return;
+  }
+
+  if (drag.handle === "end") {
     drawing.x2 = point.time;
     drawing.y2 = point.value;
+    return;
   }
+
+  const rawDeltaTime = point.time - drag.startPointer.time;
+  const rawDeltaValue = point.value - drag.startPointer.value;
+
+  const originalMinTime = Math.min(Number(original.x1), Number(original.x2));
+  const originalMaxTime = Math.max(Number(original.x1), Number(original.x2));
+  const minDeltaTime = g.minTime - originalMinTime;
+  const maxDeltaTime = g.maxTime - originalMaxTime;
+  const deltaTime = Math.max(minDeltaTime, Math.min(maxDeltaTime, rawDeltaTime));
+
+  const originalMinValue = Math.min(Number(original.y1), Number(original.y2));
+  const originalMaxValue = Math.max(Number(original.y1), Number(original.y2));
+  const minDeltaValue = g.minValue - originalMinValue;
+  const maxDeltaValue = g.maxValue - originalMaxValue;
+  const deltaValue = Math.max(minDeltaValue, Math.min(maxDeltaValue, rawDeltaValue));
+
+  drawing.x1 = Number(original.x1) + deltaTime;
+  drawing.x2 = Number(original.x2) + deltaTime;
+  drawing.y1 = Number(original.y1) + deltaValue;
+  drawing.y2 = Number(original.y2) + deltaValue;
 }
 
 function finishIndicatorDrawingDrag(commit = true) {
@@ -4817,7 +4871,9 @@ function finishIndicatorDrawingDrag(commit = true) {
   const canvas = $("indicatorChartCanvas");
   if (canvas) canvas.style.cursor = "default";
   const status = $("indicatorChartStatus");
-  if (status) status.textContent = commit ? "작도 위치를 저장했습니다." : "작도 이동을 취소했습니다.";
+  if (status) status.textContent = commit
+    ? "작도 위치를 저장했습니다. 선 자체 또는 끝점을 다시 드래그해 계속 수정할 수 있습니다."
+    : "작도 이동을 취소했습니다.";
   renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, drag.indicatorId);
 }
 
@@ -4967,6 +5023,10 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       const currentState = readIndicatorChartState(data);
       hideIndicatorChartTooltip();
 
+      if (currentState.mode === "select") {
+        event.preventDefault();
+      }
+
       if (currentState.mode === "horizontal") {
         addIndicatorDrawing(indicatorId, { type: "horizontal", value: point.value });
         refreshIndicatorChart(data, history);
@@ -5016,6 +5076,15 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
         return;
       }
 
+      if (nearest?.type === "trend") {
+        beginIndicatorDrawingDrag(canvas, event, indicatorId, point, {
+          drawing: nearest,
+          type: "trend",
+          handle: "body"
+        });
+        return;
+      }
+
       renderIndicatorChartCanvas(data, history, indicatorId);
     };
 
@@ -5024,6 +5093,7 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       if (!point) return;
 
       if (INDICATOR_CHART_DRAG_STATE) {
+        event.preventDefault();
         updateIndicatorDrawingDrag(point);
         renderIndicatorChartCanvas(data, history, indicatorId);
         return;
@@ -5045,7 +5115,15 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
 
       const handle = findNearestIndicatorDrawingHandle(point);
       const nearest = findNearestIndicatorDrawing(point);
-      canvas.style.cursor = handle || nearest?.type === "horizontal" ? "grab" : nearest ? "pointer" : "default";
+      if (handle) {
+        canvas.style.cursor = "move";
+      } else if (nearest?.type === "horizontal") {
+        canvas.style.cursor = "ns-resize";
+      } else if (nearest?.type === "trend") {
+        canvas.style.cursor = "grab";
+      } else {
+        canvas.style.cursor = "default";
+      }
     };
 
     canvas.onpointerup = event => {
