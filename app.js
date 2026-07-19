@@ -3230,6 +3230,8 @@ function localDataSummary() {
   const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
   const monthlyFocuses = readMonthlyFocusMap();
+  const indicatorDrawings = readIndicatorDrawings();
+  const drawingCount = Object.values(indicatorDrawings).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0);
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
     reviewCount: weeklyReviews.length,
@@ -3238,7 +3240,8 @@ function localDataSummary() {
     eventCount: economicEvents.length,
     reportCount: weeklyReports.length,
     calendarMonth: calendarState.month,
-    monthlyFocusCount: Object.keys(monthlyFocuses || {}).length
+    monthlyFocusCount: Object.keys(monthlyFocuses || {}).length,
+    drawingCount
   };
 }
 
@@ -3255,6 +3258,8 @@ function buildBackupPayload(scope = "full") {
   const weeklyReports = readWeeklyReports();
   const calendarState = readCalendarState();
   const monthlyFocuses = readMonthlyFocusMap();
+  const indicatorDrawings = readIndicatorDrawings();
+  const indicatorChartState = readIndicatorChartState(APP_VIEW_DATA);
 
   const data = {};
   if (scope === "full" || scope === "manual") {
@@ -3265,6 +3270,8 @@ function buildBackupPayload(scope = "full") {
     data.weeklyReports = weeklyReports;
     data.calendarState = calendarState;
     data.monthlyFocuses = monthlyFocuses;
+    data.indicatorDrawings = indicatorDrawings;
+    data.indicatorChartState = indicatorChartState;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -3348,8 +3355,18 @@ function restoreBackupPayload(payload) {
     restored.push("월간 캘린더 포커스");
   }
 
+  if (data.indicatorDrawings && typeof data.indicatorDrawings === "object" && !Array.isArray(data.indicatorDrawings)) {
+    writeIndicatorDrawings(data.indicatorDrawings);
+    restored.push("지표 차트 작도");
+  }
+
+  if (data.indicatorChartState && typeof data.indicatorChartState === "object" && !Array.isArray(data.indicatorChartState)) {
+    writeIndicatorChartState(data.indicatorChartState);
+    restored.push("지표 차트 선택 상태");
+  }
+
   if (!restored.length) {
-    throw new Error("복원 가능한 데이터가 없습니다. manualOverrides, weeklyReviews, portfolioHoldings 중 하나가 필요합니다.");
+    throw new Error("복원 가능한 데이터가 없습니다. 수동 기록, 포트폴리오 또는 지표 작도 데이터가 필요합니다.");
   }
 
   return restored;
@@ -3362,7 +3379,7 @@ function renderBackupPanel() {
       <div class="manual-panel-header">
         <div>
           <h3>백업 · 복원</h3>
-          <p class="muted">수동 입력, 주간 점검 캘린더, 포트폴리오 자산 배분은 브라우저에 저장됩니다. 맥북으로 옮기기 전에 JSON 백업 파일로 내보내면 복원할 수 있습니다.</p>
+          <p class="muted">수동 입력, 주간 점검 캘린더, 포트폴리오 자산 배분, 지표 차트 작도는 브라우저에 저장됩니다. 다른 기기로 옮기기 전에 JSON 백업 파일로 내보내면 복원할 수 있습니다.</p>
         </div>
         ${badge("manual-updated", "localStorage")}
       </div>
@@ -3374,6 +3391,7 @@ function renderBackupPanel() {
         <div><strong>${summary.eventCount}</strong><span>경제 이벤트</span></div>
         <div><strong>${summary.reportCount}</strong><span>시장 리포트</span></div>
         <div><strong>${summary.monthlyFocusCount}</strong><span>월간 포커스</span></div>
+        <div><strong>${summary.drawingCount}</strong><span>차트 작도</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -3428,7 +3446,7 @@ function setupBackupHandlers() {
 
   if (clear) {
     clear.onclick = () => {
-      const ok = confirm("수동 입력값, 주간 점검 기록, 포트폴리오 자산 배분을 모두 삭제할까요? 이 작업은 백업 없이는 되돌릴 수 없습니다.");
+      const ok = confirm("수동 입력값, 주간 점검 기록, 포트폴리오 자산 배분, 지표 차트 작도를 모두 삭제할까요? 이 작업은 백업 없이는 되돌릴 수 없습니다.");
       if (!ok) return;
       localStorage.removeItem(MANUAL_STORAGE_KEY);
       localStorage.removeItem(WEEKLY_REVIEW_STORAGE_KEY);
@@ -3439,6 +3457,10 @@ function setupBackupHandlers() {
       localStorage.removeItem(WEEKLY_REPORT_STORAGE_KEY);
       localStorage.removeItem(CALENDAR_STATE_STORAGE_KEY);
       localStorage.removeItem(MONTHLY_FOCUS_STORAGE_KEY);
+      localStorage.removeItem(INDICATOR_DRAWINGS_STORAGE_KEY);
+      localStorage.removeItem(INDICATOR_CHART_STATE_STORAGE_KEY);
+      INDICATOR_CHART_PENDING_POINT = null;
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -4087,6 +4109,592 @@ function setupEconomicEventHandlers() {
   });
 }
 
+
+const INDICATOR_DRAWINGS_STORAGE_KEY = "eightAxisIndicatorDrawingsV1";
+const INDICATOR_CHART_STATE_STORAGE_KEY = "eightAxisIndicatorChartStateV1";
+
+let INDICATOR_CHART_RUNTIME = null;
+let INDICATOR_CHART_PENDING_POINT = null;
+let INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+let INDICATOR_CHART_RESIZE_BOUND = false;
+
+function readIndicatorDrawings() {
+  const drawings = readJsonStorage(INDICATOR_DRAWINGS_STORAGE_KEY, {});
+  return drawings && typeof drawings === "object" && !Array.isArray(drawings) ? drawings : {};
+}
+
+function writeIndicatorDrawings(drawings) {
+  writeJsonStorage(INDICATOR_DRAWINGS_STORAGE_KEY, drawings || {});
+}
+
+function readIndicatorChartState(data = APP_VIEW_DATA) {
+  const saved = readJsonStorage(INDICATOR_CHART_STATE_STORAGE_KEY, {});
+  const candidates = (data?.indicators || []).filter(item => {
+    const current = Number(item.currentValue);
+    const previous = Number(item.previousValue);
+    return Number.isFinite(current) || Number.isFinite(previous);
+  });
+  const fallbackId = candidates[0]?.id || "";
+  const indicatorId = candidates.some(item => item.id === saved.indicatorId) ? saved.indicatorId : fallbackId;
+  const mode = ["select", "trend", "horizontal"].includes(saved.mode) ? saved.mode : "select";
+  return { indicatorId, mode };
+}
+
+function writeIndicatorChartState(state) {
+  writeJsonStorage(INDICATOR_CHART_STATE_STORAGE_KEY, {
+    indicatorId: state?.indicatorId || "",
+    mode: ["select", "trend", "horizontal"].includes(state?.mode) ? state.mode : "select"
+  });
+}
+
+function indicatorDrawingsFor(indicatorId) {
+  const all = readIndicatorDrawings();
+  return Array.isArray(all[indicatorId]) ? all[indicatorId] : [];
+}
+
+function writeIndicatorDrawingsFor(indicatorId, drawings) {
+  const all = readIndicatorDrawings();
+  if (drawings.length) all[indicatorId] = drawings;
+  else delete all[indicatorId];
+  writeIndicatorDrawings(all);
+}
+
+function indicatorChartCandidates(data) {
+  return (data?.indicators || []).filter(item => {
+    const current = Number(item.currentValue);
+    const previous = Number(item.previousValue);
+    return Number.isFinite(current) || Number.isFinite(previous);
+  });
+}
+
+function parseChartTimestamp(value, fallbackIndex = 0) {
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) return parsed;
+  return Date.now() + fallbackIndex * 86400000;
+}
+
+function getIndicatorChartSeries(data, history, indicatorId) {
+  const rows = [];
+  getHistorySnapshots(history).forEach((snapshot, index) => {
+    const item = getSnapshotIndicator(snapshot, indicatorId);
+    const value = Number(item?.currentValue);
+    if (!Number.isFinite(value)) return;
+    rows.push({
+      time: parseChartTimestamp(snapshot.updatedAt || snapshot.date, index),
+      value,
+      label: snapshot.date || String(snapshot.updatedAt || "").slice(0, 10) || `기록 ${index + 1}`
+    });
+  });
+
+  const current = getIndicator(data, indicatorId);
+  const currentValue = Number(current?.currentValue);
+  const previousValue = Number(current?.previousValue);
+  const currentTime = parseChartTimestamp(data?.meta?.updatedAt || new Date().toISOString(), rows.length);
+
+  if (!rows.length && Number.isFinite(previousValue)) {
+    rows.push({
+      time: currentTime - 7 * 86400000,
+      value: previousValue,
+      label: "이전값"
+    });
+  }
+
+  if (Number.isFinite(currentValue)) {
+    const duplicate = rows.some(row => Math.abs(row.time - currentTime) < 60000 && row.value === currentValue);
+    if (!duplicate) {
+      rows.push({
+        time: currentTime,
+        value: currentValue,
+        label: String(data?.meta?.updatedAt || "").slice(0, 10) || "현재"
+      });
+    }
+  }
+
+  return rows
+    .filter(row => Number.isFinite(row.time) && Number.isFinite(row.value))
+    .sort((a, b) => a.time - b.time);
+}
+
+function formatChartValue(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  const abs = Math.abs(numeric);
+  const maximumFractionDigits = abs >= 1000 ? 0 : abs >= 100 ? 1 : abs >= 1 ? 2 : 4;
+  return numeric.toLocaleString("ko-KR", { maximumFractionDigits });
+}
+
+function formatChartDate(timestamp) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
+function renderIndicatorChartView(data, history) {
+  const panel = $("indicatorChartPanel");
+  if (!panel) return;
+
+  const candidates = indicatorChartCandidates(data);
+  if (!candidates.length) {
+    panel.innerHTML = `<div class="chart-empty">차트로 표시할 숫자형 지표가 없습니다.</div>`;
+    return;
+  }
+
+  const state = readIndicatorChartState(data);
+  const selected = candidates.find(item => item.id === state.indicatorId) || candidates[0];
+  const series = getIndicatorChartSeries(data, history, selected.id);
+  const drawings = indicatorDrawingsFor(selected.id);
+
+  panel.innerHTML = `
+    <div class="indicator-chart-shell">
+      <div class="indicator-chart-controls">
+        <label>
+          <span>지표</span>
+          <select id="indicatorChartSelect">
+            ${candidates.map(item => `
+              <option value="${escapeHtml(item.id)}" ${item.id === selected.id ? "selected" : ""}>
+                ${escapeHtml(item.axisName || "")} · ${escapeHtml(item.name)}
+              </option>
+            `).join("")}
+          </select>
+        </label>
+        <div class="drawing-toolbar" role="toolbar" aria-label="차트 작도 도구">
+          <button type="button" data-chart-mode="select" class="${state.mode === "select" ? "active" : ""}">선택</button>
+          <button type="button" data-chart-mode="trend" class="${state.mode === "trend" ? "active" : ""}">추세선</button>
+          <button type="button" data-chart-mode="horizontal" class="${state.mode === "horizontal" ? "active" : ""}">수평선</button>
+          <button type="button" id="undoIndicatorDrawing" ${drawings.length ? "" : "disabled"}>마지막 취소</button>
+          <button type="button" id="deleteIndicatorDrawing" ${INDICATOR_CHART_SELECTED_DRAWING_ID ? "" : "disabled"}>선택 삭제</button>
+          <button type="button" id="clearIndicatorDrawings" ${drawings.length ? "" : "disabled"}>전체 삭제</button>
+        </div>
+      </div>
+
+      <div class="indicator-chart-meta">
+        <div>
+          <strong>${escapeHtml(selected.name)}</strong>
+          <span>${escapeHtml(selected.axisName || "")} · ${escapeHtml(selected.timingLabel || "")}</span>
+        </div>
+        <div>
+          <strong>${formatValue(selected.currentValue, selected.unit)}</strong>
+          <span>기록 ${series.length}개 · 작도 ${drawings.length}개</span>
+        </div>
+      </div>
+
+      <div class="indicator-chart-stage" id="indicatorChartStage">
+        <canvas id="indicatorChartCanvas" aria-label="${escapeHtml(selected.name)} 시계열 차트"></canvas>
+        <div class="indicator-chart-help" id="indicatorChartHelp"></div>
+      </div>
+
+      <div class="indicator-chart-status">
+        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "선을 클릭하면 선택할 수 있습니다."}</span>
+        <span>작도는 이 브라우저에 자동 저장됩니다.</span>
+      </div>
+    </div>
+  `;
+
+  setupIndicatorChartHandlers(data, history, selected.id);
+  requestAnimationFrame(() => renderIndicatorChartCanvas(data, history, selected.id));
+}
+
+function chartCanvasGeometry(canvas, series, drawings) {
+  const width = Math.max(320, canvas.clientWidth || 320);
+  const height = Math.max(360, canvas.clientHeight || 360);
+  const padding = { left: 72, right: 24, top: 26, bottom: 46 };
+  const plotWidth = Math.max(1, width - padding.left - padding.right);
+  const plotHeight = Math.max(1, height - padding.top - padding.bottom);
+
+  let minTime = Math.min(...series.map(row => row.time));
+  let maxTime = Math.max(...series.map(row => row.time));
+  if (!Number.isFinite(minTime) || !Number.isFinite(maxTime)) {
+    minTime = Date.now() - 7 * 86400000;
+    maxTime = Date.now();
+  }
+  if (minTime === maxTime) {
+    minTime -= 86400000;
+    maxTime += 86400000;
+  }
+
+  const values = series.map(row => row.value);
+  drawings.forEach(drawing => {
+    if (Number.isFinite(Number(drawing.y1))) values.push(Number(drawing.y1));
+    if (Number.isFinite(Number(drawing.y2))) values.push(Number(drawing.y2));
+    if (Number.isFinite(Number(drawing.value))) values.push(Number(drawing.value));
+  });
+
+  let minValue = Math.min(...values);
+  let maxValue = Math.max(...values);
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    minValue = 0;
+    maxValue = 1;
+  }
+  const span = maxValue - minValue;
+  const valuePadding = span > 0 ? span * 0.12 : Math.max(Math.abs(maxValue) * 0.08, 1);
+  minValue -= valuePadding;
+  maxValue += valuePadding;
+
+  const xToPixel = time => padding.left + ((time - minTime) / (maxTime - minTime)) * plotWidth;
+  const yToPixel = value => padding.top + ((maxValue - value) / (maxValue - minValue)) * plotHeight;
+  const pixelToTime = x => minTime + ((x - padding.left) / plotWidth) * (maxTime - minTime);
+  const pixelToValue = y => maxValue - ((y - padding.top) / plotHeight) * (maxValue - minValue);
+
+  return {
+    width,
+    height,
+    padding,
+    plotWidth,
+    plotHeight,
+    minTime,
+    maxTime,
+    minValue,
+    maxValue,
+    xToPixel,
+    yToPixel,
+    pixelToTime,
+    pixelToValue
+  };
+}
+
+function resizeChartCanvas(canvas) {
+  const ratio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const width = Math.max(320, canvas.clientWidth || 320);
+  const height = Math.max(360, canvas.clientHeight || 360);
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return context;
+}
+
+function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = null) {
+  const canvas = $("indicatorChartCanvas");
+  if (!canvas) return;
+
+  const series = getIndicatorChartSeries(data, history, indicatorId);
+  const drawings = indicatorDrawingsFor(indicatorId);
+  const context = resizeChartCanvas(canvas);
+  const g = chartCanvasGeometry(canvas, series, drawings);
+  INDICATOR_CHART_RUNTIME = { indicatorId, series, drawings, geometry: g };
+
+  context.clearRect(0, 0, g.width, g.height);
+  context.fillStyle = "rgba(8, 13, 27, 0.96)";
+  context.fillRect(0, 0, g.width, g.height);
+
+  context.font = "12px system-ui, sans-serif";
+  context.textBaseline = "middle";
+  context.lineWidth = 1;
+
+  for (let i = 0; i <= 5; i += 1) {
+    const y = g.padding.top + (g.plotHeight / 5) * i;
+    const value = g.maxValue - ((g.maxValue - g.minValue) / 5) * i;
+    context.strokeStyle = "rgba(255,255,255,0.08)";
+    context.beginPath();
+    context.moveTo(g.padding.left, y);
+    context.lineTo(g.width - g.padding.right, y);
+    context.stroke();
+    context.fillStyle = "rgba(238,243,255,0.62)";
+    context.textAlign = "right";
+    context.fillText(formatChartValue(value), g.padding.left - 10, y);
+  }
+
+  const tickCount = Math.min(5, Math.max(2, series.length));
+  for (let i = 0; i < tickCount; i += 1) {
+    const ratio = tickCount === 1 ? 0 : i / (tickCount - 1);
+    const x = g.padding.left + g.plotWidth * ratio;
+    const time = g.minTime + (g.maxTime - g.minTime) * ratio;
+    context.strokeStyle = "rgba(255,255,255,0.06)";
+    context.beginPath();
+    context.moveTo(x, g.padding.top);
+    context.lineTo(x, g.height - g.padding.bottom);
+    context.stroke();
+    context.fillStyle = "rgba(238,243,255,0.55)";
+    context.textAlign = i === 0 ? "left" : i === tickCount - 1 ? "right" : "center";
+    context.fillText(formatChartDate(time), x, g.height - 20);
+  }
+
+  context.save();
+  context.beginPath();
+  context.rect(g.padding.left, g.padding.top, g.plotWidth, g.plotHeight);
+  context.clip();
+
+  if (series.length > 1) {
+    context.strokeStyle = "#8ec5ff";
+    context.lineWidth = 2.4;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.beginPath();
+    series.forEach((row, index) => {
+      const x = g.xToPixel(row.time);
+      const y = g.yToPixel(row.value);
+      if (index === 0) context.moveTo(x, y);
+      else context.lineTo(x, y);
+    });
+    context.stroke();
+  }
+
+  series.forEach(row => {
+    context.beginPath();
+    context.arc(g.xToPixel(row.time), g.yToPixel(row.value), 3.4, 0, Math.PI * 2);
+    context.fillStyle = "#eef3ff";
+    context.fill();
+    context.strokeStyle = "#8ec5ff";
+    context.lineWidth = 1.5;
+    context.stroke();
+  });
+
+  drawings.forEach(drawing => {
+    const selected = drawing.id === INDICATOR_CHART_SELECTED_DRAWING_ID;
+    context.strokeStyle = selected ? "#ffffff" : drawing.type === "horizontal" ? "#37d67a" : "#ffd166";
+    context.lineWidth = selected ? 3 : 2;
+    context.setLineDash(selected ? [] : [8, 5]);
+    context.beginPath();
+
+    if (drawing.type === "horizontal") {
+      const y = g.yToPixel(Number(drawing.value));
+      context.moveTo(g.padding.left, y);
+      context.lineTo(g.width - g.padding.right, y);
+      context.stroke();
+      context.fillStyle = selected ? "#ffffff" : "#37d67a";
+      context.textAlign = "right";
+      context.fillText(formatChartValue(drawing.value), g.width - g.padding.right - 6, y - 10);
+    } else {
+      context.moveTo(g.xToPixel(Number(drawing.x1)), g.yToPixel(Number(drawing.y1)));
+      context.lineTo(g.xToPixel(Number(drawing.x2)), g.yToPixel(Number(drawing.y2)));
+      context.stroke();
+    }
+  });
+
+  if (INDICATOR_CHART_PENDING_POINT && previewPoint) {
+    context.strokeStyle = "rgba(255, 209, 102, 0.8)";
+    context.lineWidth = 2;
+    context.setLineDash([5, 5]);
+    context.beginPath();
+    context.moveTo(g.xToPixel(INDICATOR_CHART_PENDING_POINT.time), g.yToPixel(INDICATOR_CHART_PENDING_POINT.value));
+    context.lineTo(g.xToPixel(previewPoint.time), g.yToPixel(previewPoint.value));
+    context.stroke();
+  }
+
+  context.restore();
+  context.setLineDash([]);
+
+  if (!series.length) {
+    context.fillStyle = "rgba(238,243,255,0.62)";
+    context.font = "14px system-ui, sans-serif";
+    context.textAlign = "center";
+    context.fillText("history.json에 이 지표의 기록이 없습니다.", g.width / 2, g.height / 2);
+  }
+}
+
+function canvasPointerPosition(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  };
+}
+
+function chartPointFromPointer(canvas, event) {
+  if (!INDICATOR_CHART_RUNTIME) return null;
+  const point = canvasPointerPosition(canvas, event);
+  const g = INDICATOR_CHART_RUNTIME.geometry;
+  const x = Math.max(g.padding.left, Math.min(g.width - g.padding.right, point.x));
+  const y = Math.max(g.padding.top, Math.min(g.height - g.padding.bottom, point.y));
+  return {
+    pixelX: x,
+    pixelY: y,
+    time: g.pixelToTime(x),
+    value: g.pixelToValue(y)
+  };
+}
+
+function pointSegmentDistance(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
+function findNearestIndicatorDrawing(pointer, maxDistance = 10) {
+  if (!INDICATOR_CHART_RUNTIME) return null;
+  const g = INDICATOR_CHART_RUNTIME.geometry;
+  let nearest = null;
+  let nearestDistance = Infinity;
+
+  INDICATOR_CHART_RUNTIME.drawings.forEach(drawing => {
+    let distance;
+    if (drawing.type === "horizontal") {
+      distance = Math.abs(pointer.pixelY - g.yToPixel(Number(drawing.value)));
+    } else {
+      distance = pointSegmentDistance(
+        pointer.pixelX,
+        pointer.pixelY,
+        g.xToPixel(Number(drawing.x1)),
+        g.yToPixel(Number(drawing.y1)),
+        g.xToPixel(Number(drawing.x2)),
+        g.yToPixel(Number(drawing.y2))
+      );
+    }
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearest = drawing;
+    }
+  });
+
+  return nearestDistance <= maxDistance ? nearest : null;
+}
+
+function refreshIndicatorChart(data = APP_VIEW_DATA, history = APP_HISTORY_DATA) {
+  INDICATOR_CHART_PENDING_POINT = null;
+  renderIndicatorChartView(data, history);
+}
+
+function addIndicatorDrawing(indicatorId, drawing) {
+  const drawings = indicatorDrawingsFor(indicatorId);
+  drawings.push({ id: `drawing-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...drawing });
+  writeIndicatorDrawingsFor(indicatorId, drawings);
+}
+
+function setupIndicatorChartHandlers(data, history, indicatorId) {
+  const select = $("indicatorChartSelect");
+  const canvas = $("indicatorChartCanvas");
+  const state = readIndicatorChartState(data);
+
+  if (select) {
+    select.onchange = () => {
+      INDICATOR_CHART_PENDING_POINT = null;
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      writeIndicatorChartState({ indicatorId: select.value, mode: state.mode });
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  document.querySelectorAll("[data-chart-mode]").forEach(button => {
+    button.onclick = () => {
+      const nextMode = button.dataset.chartMode;
+      INDICATOR_CHART_PENDING_POINT = null;
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      writeIndicatorChartState({ indicatorId, mode: nextMode });
+      refreshIndicatorChart(data, history);
+    };
+  });
+
+  const undo = $("undoIndicatorDrawing");
+  if (undo) {
+    undo.onclick = () => {
+      const drawings = indicatorDrawingsFor(indicatorId);
+      drawings.pop();
+      writeIndicatorDrawingsFor(indicatorId, drawings);
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  const deleteSelected = $("deleteIndicatorDrawing");
+  if (deleteSelected) {
+    deleteSelected.onclick = () => {
+      if (!INDICATOR_CHART_SELECTED_DRAWING_ID) return;
+      writeIndicatorDrawingsFor(
+        indicatorId,
+        indicatorDrawingsFor(indicatorId).filter(item => item.id !== INDICATOR_CHART_SELECTED_DRAWING_ID)
+      );
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  const clear = $("clearIndicatorDrawings");
+  if (clear) {
+    clear.onclick = () => {
+      if (!confirm("이 지표의 작도를 모두 삭제할까요?")) return;
+      writeIndicatorDrawingsFor(indicatorId, []);
+      INDICATOR_CHART_PENDING_POINT = null;
+      INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+      refreshIndicatorChart(data, history);
+    };
+  }
+
+  if (canvas) {
+    canvas.onpointerdown = event => {
+      const point = chartPointFromPointer(canvas, event);
+      if (!point) return;
+      const currentState = readIndicatorChartState(data);
+
+      if (currentState.mode === "horizontal") {
+        addIndicatorDrawing(indicatorId, { type: "horizontal", value: point.value });
+        refreshIndicatorChart(data, history);
+        return;
+      }
+
+      if (currentState.mode === "trend") {
+        if (!INDICATOR_CHART_PENDING_POINT) {
+          INDICATOR_CHART_PENDING_POINT = { time: point.time, value: point.value };
+          const status = $("indicatorChartStatus");
+          if (status) status.textContent = "끝점을 선택하세요. Esc를 누르면 취소됩니다.";
+          renderIndicatorChartCanvas(data, history, indicatorId, point);
+        } else {
+          addIndicatorDrawing(indicatorId, {
+            type: "trend",
+            x1: INDICATOR_CHART_PENDING_POINT.time,
+            y1: INDICATOR_CHART_PENDING_POINT.value,
+            x2: point.time,
+            y2: point.value
+          });
+          INDICATOR_CHART_PENDING_POINT = null;
+          refreshIndicatorChart(data, history);
+        }
+        return;
+      }
+
+      const nearest = findNearestIndicatorDrawing(point);
+      INDICATOR_CHART_SELECTED_DRAWING_ID = nearest?.id || null;
+      refreshIndicatorChart(data, history);
+    };
+
+    canvas.onpointermove = event => {
+      if (!INDICATOR_CHART_PENDING_POINT) return;
+      const point = chartPointFromPointer(canvas, event);
+      if (point) renderIndicatorChartCanvas(data, history, indicatorId, point);
+    };
+
+    canvas.onpointerleave = () => {
+      if (INDICATOR_CHART_PENDING_POINT) {
+        renderIndicatorChartCanvas(data, history, indicatorId, INDICATOR_CHART_PENDING_POINT);
+      }
+    };
+  }
+
+  if (!INDICATOR_CHART_RESIZE_BOUND) {
+    INDICATOR_CHART_RESIZE_BOUND = true;
+    window.addEventListener("resize", () => {
+      const chartState = readIndicatorChartState(APP_VIEW_DATA);
+      if ($("indicatorChartCanvas") && chartState.indicatorId) {
+        renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, chartState.indicatorId);
+      }
+    });
+
+    document.addEventListener("keydown", event => {
+      if (!$("chartView")?.classList.contains("active")) return;
+      if (event.key === "Escape") {
+        INDICATOR_CHART_PENDING_POINT = null;
+        const chartState = readIndicatorChartState(APP_VIEW_DATA);
+        renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, chartState.indicatorId);
+      }
+      if ((event.key === "Delete" || event.key === "Backspace") && INDICATOR_CHART_SELECTED_DRAWING_ID) {
+        const chartState = readIndicatorChartState(APP_VIEW_DATA);
+        writeIndicatorDrawingsFor(
+          chartState.indicatorId,
+          indicatorDrawingsFor(chartState.indicatorId).filter(item => item.id !== INDICATOR_CHART_SELECTED_DRAWING_ID)
+        );
+        INDICATOR_CHART_SELECTED_DRAWING_ID = null;
+        refreshIndicatorChart(APP_VIEW_DATA, APP_HISTORY_DATA);
+      }
+    });
+  }
+}
+
+
 function renderTodo(data) {
   const todo = data.todo || { items: [] };
   const visibleTodoItems = (todo.items || []).filter(item => !isAutomatedTodoItem(item));
@@ -4129,6 +4737,7 @@ function renderAll(data) {
   renderTiming(data);
   renderMatrix(data);
   renderIndicators(data);
+  renderIndicatorChartView(data, APP_HISTORY_DATA);
   renderTodo(data);
 }
 
@@ -4140,15 +4749,24 @@ function setupTabs() {
     timing: $("timingView"),
     matrix: $("matrixView"),
     indicators: $("indicatorsView"),
+    chart: $("chartView"),
     todo: $("todoView")
   };
 
   tabs.forEach(tab => {
     tab.addEventListener("click", () => {
       tabs.forEach(item => item.classList.remove("active"));
-      Object.values(views).forEach(view => view.classList.remove("active"));
+      Object.values(views).filter(Boolean).forEach(view => view.classList.remove("active"));
       tab.classList.add("active");
-      views[tab.dataset.view].classList.add("active");
+      const nextView = views[tab.dataset.view];
+      if (!nextView) return;
+      nextView.classList.add("active");
+      if (tab.dataset.view === "chart") {
+        requestAnimationFrame(() => {
+          const state = readIndicatorChartState(APP_VIEW_DATA);
+          if (state.indicatorId) renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, state.indicatorId);
+        });
+      }
     });
   });
 }
