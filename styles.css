@@ -237,12 +237,18 @@ tr:last-child td { border-bottom: 0; }
 
 .indicator-chart-controls select {
   width: 100%;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 12px;
   padding: 10px 12px;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  color: #10172a;
+  background: #ffffff;
+  color-scheme: light;
   font: inherit;
+}
+
+.indicator-chart-controls select option {
+  color: #10172a;
+  background: #ffffff;
 }
 
 .drawing-toolbar {
@@ -251,7 +257,8 @@ tr:last-child td { border-bottom: 0; }
   gap: 8px;
 }
 
-.drawing-toolbar button {
+.drawing-toolbar button,
+.indicator-y-range-actions button {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 9px 12px;
@@ -261,20 +268,68 @@ tr:last-child td { border-bottom: 0; }
   font-weight: 800;
 }
 
-.drawing-toolbar button:hover:not(:disabled) {
+.drawing-toolbar button:hover:not(:disabled),
+.indicator-y-range-actions button:hover:not(:disabled) {
   border-color: rgba(142, 197, 255, 0.5);
   color: var(--text);
 }
 
-.drawing-toolbar button.active {
+.drawing-toolbar button.active,
+.indicator-y-range-actions button.active {
   color: #10172a;
   background: var(--manual);
   border-color: var(--manual);
 }
 
-.drawing-toolbar button:disabled {
+.drawing-toolbar button:disabled,
+.indicator-y-range-actions button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
+}
+
+.indicator-y-range-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.indicator-y-range-inputs,
+.indicator-y-range-actions {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.indicator-y-range-inputs label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.indicator-y-range-inputs input {
+  width: 150px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: rgba(8, 13, 27, 0.82);
+  font: inherit;
+}
+
+.indicator-y-range-inputs input:focus {
+  outline: none;
+  border-color: rgba(142, 197, 255, 0.58);
+  box-shadow: 0 0 0 3px rgba(142, 197, 255, 0.12);
 }
 
 .indicator-chart-meta {
@@ -322,7 +377,7 @@ tr:last-child td { border-bottom: 0; }
   display: block;
   width: 100%;
   height: 420px;
-  cursor: crosshair;
+  cursor: default;
 }
 
 .indicator-chart-help {
@@ -332,6 +387,44 @@ tr:last-child td { border-bottom: 0; }
   pointer-events: none;
   color: rgba(238, 243, 255, 0.5);
   font-size: 11px;
+}
+
+.indicator-chart-tooltip {
+  position: absolute;
+  z-index: 4;
+  min-width: 180px;
+  max-width: min(280px, calc(100% - 16px));
+  padding: 10px 12px;
+  border: 1px solid rgba(142, 197, 255, 0.42);
+  border-radius: 12px;
+  background: rgba(6, 9, 20, 0.96);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+
+.indicator-chart-tooltip strong,
+.indicator-chart-tooltip span,
+.indicator-chart-tooltip em {
+  display: block;
+}
+
+.indicator-chart-tooltip strong {
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.indicator-chart-tooltip span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.indicator-chart-tooltip em {
+  margin-top: 5px;
+  color: var(--manual);
+  font-size: 16px;
+  font-style: normal;
+  font-weight: 900;
 }
 
 .indicator-chart-status {
@@ -357,7 +450,8 @@ tr:last-child td { border-bottom: 0; }
     padding: 12px;
   }
 
-  .indicator-chart-controls {
+  .indicator-chart-controls,
+  .indicator-y-range-controls {
     align-items: stretch;
   }
 
@@ -365,8 +459,22 @@ tr:last-child td { border-bottom: 0; }
     min-width: 100%;
   }
 
-  .drawing-toolbar button {
+  .drawing-toolbar button,
+  .indicator-y-range-actions button {
     flex: 1 1 calc(33.333% - 8px);
+  }
+
+  .indicator-y-range-inputs,
+  .indicator-y-range-actions {
+    width: 100%;
+  }
+
+  .indicator-y-range-inputs label {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .indicator-y-range-inputs input {
+    width: 100%;
   }
 
   .indicator-chart-meta {
