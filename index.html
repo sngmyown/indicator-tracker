@@ -25,6 +25,7 @@
       <button class="tab" data-view="timing">선행/동행/후행</button>
       <button class="tab" data-view="matrix">매트릭스</button>
       <button class="tab" data-view="indicators">지표 상세</button>
+      <button class="tab" data-view="chart">차트·작도</button>
       <button class="tab" data-view="todo">To do</button>
     </nav>
 
@@ -74,6 +75,14 @@
         <input id="indicatorSearch" type="search" placeholder="지표명, 축, source 검색" />
       </div>
       <div class="indicator-list" id="indicatorList"></div>
+    </section>
+
+    <section class="view" id="chartView">
+      <div class="section-head">
+        <h2>지표 차트 · 작도</h2>
+        <p>히스토리 추이를 확인하고 추세선과 수평선을 브라우저에 저장합니다.</p>
+      </div>
+      <div id="indicatorChartPanel"></div>
     </section>
 
     <section class="view" id="todoView">
