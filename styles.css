@@ -493,3 +493,186 @@ tr:last-child td { border-bottom: 0; }
     height: 360px;
   }
 }
+
+
+/* v4: 넓은 수동 메모 입력 */
+.manual-note-label {
+  display: block;
+  margin-top: 12px;
+}
+
+.manual-note-head {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.manual-note-expand {
+  border: 1px solid rgba(142, 197, 255, 0.32);
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: var(--manual);
+  background: rgba(142, 197, 255, 0.08);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.manual-note-textarea {
+  min-height: 170px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.manual-note-label.is-expanded {
+  position: relative;
+  z-index: 10;
+  padding: 14px;
+  border: 1px solid rgba(142, 197, 255, 0.34);
+  border-radius: 16px;
+  background: rgba(8, 13, 27, 0.98);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.46);
+}
+
+.manual-note-label.is-expanded .manual-note-textarea {
+  min-height: min(52vh, 520px);
+  font-size: 15px;
+}
+
+.fear-greed-history {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 209, 102, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 209, 102, 0.055);
+}
+
+.fear-greed-history > strong {
+  color: #fff4c2;
+  font-size: 13px;
+}
+
+.fear-greed-history-row {
+  display: grid;
+  grid-template-columns: 100px 64px auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.fear-greed-history-row span,
+.fear-greed-history-row em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.fear-greed-history-row b {
+  color: #ffffff;
+}
+
+.fear-greed-history-row em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v4: 차트 분석 메모 */
+.indicator-chart-note-panel {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid rgba(142, 197, 255, 0.18);
+  border-radius: 16px;
+  background: rgba(142, 197, 255, 0.045);
+}
+
+.indicator-chart-note-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+
+.indicator-chart-note-head strong,
+.indicator-chart-note-head span {
+  display: block;
+}
+
+.indicator-chart-note-head strong {
+  color: var(--text);
+}
+
+.indicator-chart-note-head span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#indicatorChartNote {
+  width: 100%;
+  min-height: 170px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 12px 13px;
+  color: var(--text);
+  background: rgba(8, 13, 27, 0.84);
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+#indicatorChartNote:focus {
+  outline: none;
+  border-color: rgba(142, 197, 255, 0.56);
+  box-shadow: 0 0 0 3px rgba(142, 197, 255, 0.12);
+}
+
+.indicator-chart-note-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.indicator-chart-note-actions button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.indicator-chart-note-actions button:first-child {
+  border-color: rgba(142, 197, 255, 0.38);
+  background: rgba(142, 197, 255, 0.13);
+}
+
+@media (max-width: 760px) {
+  .fear-greed-history-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .fear-greed-history-row em {
+    grid-column: 1 / -1;
+    white-space: normal;
+  }
+
+  .indicator-chart-note-head {
+    flex-direction: column;
+  }
+
+  .indicator-chart-note-actions button {
+    flex: 1 1 auto;
+  }
+}
