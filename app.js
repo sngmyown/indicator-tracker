@@ -84,6 +84,7 @@ const PORTFOLIO_STORAGE_KEY = "eightAxisPortfolioAllocationsV1";
 const CHECKLIST_STORAGE_KEY = "eightAxisChecklistStatusV1";
 const ECONOMIC_EVENTS_STORAGE_KEY = "eightAxisEconomicEventsV1";
 const WEEKLY_REPORT_STORAGE_KEY = "eightAxisWeeklyReportsV1";
+const FEAR_GREED_HISTORY_STORAGE_KEY = "eightAxisFearGreedHistoryV1";
 
 
 const MANUAL_REQUIRED_IDS = [
@@ -217,6 +218,57 @@ function cloneData(data) {
   return JSON.parse(JSON.stringify(data));
 }
 
+function isThousandPersonUnit(unit) {
+  const normalized = String(unit || "").trim().toLowerCase();
+  return normalized.includes("천명")
+    || normalized.includes("thousand")
+    || normalized === "k"
+    || normalized === "k persons"
+    || normalized === "k people";
+}
+
+function normalizeNonfarmPayrollNumber(value, unit = "") {
+  const cleaned = String(value ?? "").replaceAll(",", "").replace(/[^0-9.+-]/g, "");
+  const numeric = Number(cleaned);
+  if (!Number.isFinite(numeric)) return value;
+
+  // 비농업 고용은 API에 따라 '천 명' 단위로 들어옵니다.
+  // 57 -> 57,000명, 570 -> 570,000명으로 통일합니다.
+  if (isThousandPersonUnit(unit) || Math.abs(numeric) < 1000) {
+    return numeric * 1000;
+  }
+  return numeric;
+}
+
+function classifyNonfarmPayrollSignal(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "neutral";
+  if (numeric >= 150000 && numeric <= 220000) return "positive";
+  if ((numeric >= 100000 && numeric < 150000) || (numeric > 220000 && numeric <= 300000)) {
+    return "neutral";
+  }
+  return "negative";
+}
+
+function normalizeIndicatorUnits(rawData) {
+  const data = cloneData(rawData);
+  data.indicators = (data.indicators || []).map(item => {
+    if (item.id !== "nonfarm_payrolls") return item;
+
+    const originalUnit = item.unit || "";
+    const normalized = { ...item };
+    ["currentValue", "previousValue", "change"].forEach(key => {
+      if (normalized[key] === null || normalized[key] === undefined || normalized[key] === "") return;
+      normalized[key] = normalizeNonfarmPayrollNumber(normalized[key], originalUnit);
+    });
+    normalized.unit = "명";
+    normalized.signal = classifyNonfarmPayrollSignal(normalized.currentValue);
+    normalized.unitNormalizationNote = `원본 단위 ${originalUnit || "미표기"}를 명 단위로 환산`;
+    return normalized;
+  });
+  return data;
+}
+
 function normalizeManualValue(rawValue) {
   const trimmed = String(rawValue ?? "").trim();
   if (!trimmed) return "manual-required";
@@ -232,9 +284,81 @@ function formatDateForInput(dateLike) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function readFearGreedHistory() {
+  const rows = readJsonStorage(FEAR_GREED_HISTORY_STORAGE_KEY, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function writeFearGreedHistory(rows) {
+  const clean = (Array.isArray(rows) ? rows : [])
+    .filter(row => row && String(row.value ?? "").trim())
+    .sort((a, b) => String(a.checkedAt || a.updatedAt || "").localeCompare(String(b.checkedAt || b.updatedAt || "")))
+    .slice(-200);
+  writeJsonStorage(FEAR_GREED_HISTORY_STORAGE_KEY, clean);
+}
+
+function appendFearGreedHistory(entry) {
+  const value = String(entry?.value ?? "").trim();
+  if (!value) return;
+  const checkedAt = entry?.checkedAt || formatDateForInput(new Date());
+  const next = {
+    id: entry?.id || `fear-greed-${Date.now()}`,
+    value,
+    signal: entry?.signal || "neutral",
+    note: String(entry?.note || "").trim(),
+    checkedAt,
+    updatedAt: entry?.updatedAt || new Date().toISOString(),
+    source: entry?.source || "수동 지표 입력"
+  };
+  const rows = readFearGreedHistory().filter(row => {
+    return !(String(row.checkedAt || "") === String(next.checkedAt) && String(row.value ?? "") === value);
+  });
+  rows.push(next);
+  writeFearGreedHistory(rows);
+}
+
+function latestFearGreedHistory() {
+  const rows = readFearGreedHistory();
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+function currentFearGreedRecord() {
+  const historyRecord = latestFearGreedHistory();
+  if (historyRecord) return historyRecord;
+
+  const override = readManualOverrides().fear_greed_index;
+  if (!override?.enabled || !String(override.rawValue ?? "").trim()) return null;
+  return {
+    value: String(override.rawValue),
+    signal: override.signal || "neutral",
+    note: override.note || "",
+    checkedAt: override.checkedAt || "",
+    updatedAt: override.updatedAt || "",
+    source: "기존 수동 입력"
+  };
+}
+
+function migrateFearGreedOverrideToHistory() {
+  const record = currentFearGreedRecord();
+  if (!record || latestFearGreedHistory()) return;
+  appendFearGreedHistory(record);
+}
+
 function applyManualOverrides(rawData) {
   const data = cloneData(rawData);
   const overrides = readManualOverrides();
+  const latestFearGreed = latestFearGreedHistory();
+
+  if (!overrides.fear_greed_index?.enabled && latestFearGreed) {
+    overrides.fear_greed_index = {
+      enabled: true,
+      rawValue: latestFearGreed.value,
+      signal: latestFearGreed.signal || "neutral",
+      checkedAt: latestFearGreed.checkedAt || "",
+      note: latestFearGreed.note || "",
+      updatedAt: latestFearGreed.updatedAt || ""
+    };
+  }
 
   data.indicators = (data.indicators || []).map(item => {
     const override = overrides[item.id];
@@ -293,8 +417,14 @@ function renderGoldilocksZone(item, compact = false) {
 
 function formatValue(value, unit = "") {
   if (value === null || value === undefined || value === "") return "-";
+  const numeric = typeof value === "number"
+    ? value
+    : Number(String(value).replaceAll(",", ""));
+  const displayValue = Number.isFinite(numeric)
+    ? numeric.toLocaleString("ko-KR", { maximumFractionDigits: Math.abs(numeric) >= 1000 ? 0 : 4 })
+    : String(value);
   const suffix = unit && !["index", "manual", "none"].includes(unit) ? ` ${unit}` : "";
-  return `${escapeHtml(value)}${suffix}`;
+  return `${escapeHtml(displayValue)}${suffix}`;
 }
 
 function currentValueStatusClass(item) {
@@ -1882,6 +2012,26 @@ function manualSignalOptionsHtml(selected) {
   `).join("");
 }
 
+function renderFearGreedHistoryPreview() {
+  const rows = readFearGreedHistory().slice(-5).reverse();
+  if (!rows.length) {
+    return `<p class="muted fear-greed-history-empty">저장된 Fear & Greed 기록이 없습니다.</p>`;
+  }
+  return `
+    <div class="fear-greed-history">
+      <strong>최근 저장 기록</strong>
+      ${rows.map(row => `
+        <div class="fear-greed-history-row">
+          <span>${escapeHtml(row.checkedAt || "-")}</span>
+          <b>${escapeHtml(row.value)}</b>
+          ${badge(row.signal || "neutral", labelStatus(row.signal))}
+          <em>${escapeHtml(row.note || "메모 없음")}</em>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
 function renderManualInputPanel(data) {
   const overrides = readManualOverrides();
   const manualItems = (data.indicators || []).filter(isManualTarget);
@@ -1946,10 +2096,14 @@ function renderManualInputPanel(data) {
                   <input class="manual-input" type="date" data-manual-id="${escapeHtml(item.id)}" data-manual-field="checkedAt" value="${escapeHtml(checkedAt)}" />
                 </label>
               </div>
-              <label class="manual-note-label">
-                <span>메모</span>
-                <textarea class="manual-input" data-manual-id="${escapeHtml(item.id)}" data-manual-field="note" rows="3" placeholder="근거, 출처, 다음 확인 신호를 적어두세요.">${escapeHtml(note)}</textarea>
+              <label class="manual-note-label" data-manual-note-wrap="${escapeHtml(item.id)}">
+                <span class="manual-note-head">
+                  <span>메모</span>
+                  <button type="button" class="manual-note-expand" data-manual-note-expand="${escapeHtml(item.id)}">크게 보기</button>
+                </span>
+                <textarea class="manual-input manual-note-textarea" data-manual-id="${escapeHtml(item.id)}" data-manual-field="note" rows="7" placeholder="근거, 출처, 다음 확인 신호를 충분히 적어두세요.">${escapeHtml(note)}</textarea>
               </label>
+              ${item.id === "fear_greed_index" ? renderFearGreedHistoryPreview() : ""}
               <div class="manual-actions">
                 <button type="button" class="manual-save" data-manual-action="save" data-manual-id="${escapeHtml(item.id)}">저장 · 8축 반영</button>
                 <button type="button" class="manual-clear" data-manual-action="clear" data-manual-id="${escapeHtml(item.id)}">입력 삭제</button>
@@ -1963,6 +2117,18 @@ function renderManualInputPanel(data) {
 }
 
 function setupManualInputHandlers() {
+  document.querySelectorAll("[data-manual-note-expand]").forEach(button => {
+    button.onclick = event => {
+      event.preventDefault();
+      const id = button.dataset.manualNoteExpand;
+      const wrap = document.querySelector(`[data-manual-note-wrap="${CSS.escape(id)}"]`);
+      if (!wrap) return;
+      const expanded = wrap.classList.toggle("is-expanded");
+      button.textContent = expanded ? "작게 보기" : "크게 보기";
+      if (expanded) wrap.querySelector("textarea")?.focus();
+    };
+  });
+
   document.querySelectorAll("[data-manual-action]").forEach(button => {
     button.onclick = () => {
       const id = button.dataset.manualId;
@@ -1995,6 +2161,18 @@ function setupManualInputHandlers() {
 
       overrides[id] = next;
       writeManualOverrides(overrides);
+
+      if (id === "fear_greed_index") {
+        appendFearGreedHistory({
+          value: next.rawValue,
+          signal: next.signal,
+          checkedAt: next.checkedAt,
+          note: next.note,
+          updatedAt: next.updatedAt,
+          source: "수동 지표 입력"
+        });
+      }
+
       APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
@@ -2613,6 +2791,19 @@ function setupWeeklyReviewHandlers() {
       const reviews = readWeeklyReviews().filter(item => item.date !== next.date);
       reviews.push(next);
       writeWeeklyReviews(reviews);
+
+      if (String(next.fearGreed || "").trim()) {
+        appendFearGreedHistory({
+          value: next.fearGreed,
+          signal: next.fearGreedSignal,
+          checkedAt: next.date,
+          note: next.weeklyMemo,
+          updatedAt: next.updatedAt,
+          source: "주간 점검"
+        });
+      }
+
+      APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
       renderAll(APP_VIEW_DATA);
     };
   }
@@ -3232,6 +3423,8 @@ function localDataSummary() {
   const monthlyFocuses = readMonthlyFocusMap();
   const indicatorDrawings = readIndicatorDrawings();
   const indicatorChartRanges = readIndicatorChartRanges();
+  const indicatorChartNotes = readIndicatorChartNotes();
+  const fearGreedHistory = readFearGreedHistory();
   const drawingCount = Object.values(indicatorDrawings).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0);
   return {
     manualCount: Object.keys(manualOverrides || {}).length,
@@ -3243,7 +3436,9 @@ function localDataSummary() {
     calendarMonth: calendarState.month,
     monthlyFocusCount: Object.keys(monthlyFocuses || {}).length,
     drawingCount,
-    chartRangeCount: Object.keys(indicatorChartRanges || {}).length
+    chartRangeCount: Object.keys(indicatorChartRanges || {}).length,
+    chartNoteCount: Object.keys(indicatorChartNotes || {}).length,
+    fearGreedHistoryCount: fearGreedHistory.length
   };
 }
 
@@ -3263,6 +3458,8 @@ function buildBackupPayload(scope = "full") {
   const indicatorDrawings = readIndicatorDrawings();
   const indicatorChartState = readIndicatorChartState(APP_VIEW_DATA);
   const indicatorChartRanges = readIndicatorChartRanges();
+  const indicatorChartNotes = readIndicatorChartNotes();
+  const fearGreedHistory = readFearGreedHistory();
 
   const data = {};
   if (scope === "full" || scope === "manual") {
@@ -3276,6 +3473,8 @@ function buildBackupPayload(scope = "full") {
     data.indicatorDrawings = indicatorDrawings;
     data.indicatorChartState = indicatorChartState;
     data.indicatorChartRanges = indicatorChartRanges;
+    data.indicatorChartNotes = indicatorChartNotes;
+    data.fearGreedHistory = fearGreedHistory;
   }
   if (scope === "full" || scope === "portfolio") {
     data.portfolioHoldings = portfolioHoldings;
@@ -3374,6 +3573,16 @@ function restoreBackupPayload(payload) {
     restored.push("지표 차트 Y축 범위");
   }
 
+  if (data.indicatorChartNotes && typeof data.indicatorChartNotes === "object" && !Array.isArray(data.indicatorChartNotes)) {
+    writeIndicatorChartNotes(data.indicatorChartNotes);
+    restored.push("지표 차트 메모");
+  }
+
+  if (Array.isArray(data.fearGreedHistory)) {
+    writeFearGreedHistory(data.fearGreedHistory);
+    restored.push("Fear & Greed 누적 기록");
+  }
+
   if (!restored.length) {
     throw new Error("복원 가능한 데이터가 없습니다. 수동 기록, 포트폴리오 또는 지표 작도 데이터가 필요합니다.");
   }
@@ -3402,6 +3611,8 @@ function renderBackupPanel() {
         <div><strong>${summary.monthlyFocusCount}</strong><span>월간 포커스</span></div>
         <div><strong>${summary.drawingCount}</strong><span>차트 작도</span></div>
         <div><strong>${summary.chartRangeCount}</strong><span>수동 Y축 범위</span></div>
+        <div><strong>${summary.chartNoteCount}</strong><span>차트 분석 메모</span></div>
+        <div><strong>${summary.fearGreedHistoryCount}</strong><span>Fear & Greed 기록</span></div>
       </div>
       <div class="backup-actions">
         <button type="button" class="backup-primary" id="exportFullBackup">전체 데이터 백업</button>
@@ -3470,6 +3681,8 @@ function setupBackupHandlers() {
       localStorage.removeItem(INDICATOR_DRAWINGS_STORAGE_KEY);
       localStorage.removeItem(INDICATOR_CHART_STATE_STORAGE_KEY);
       localStorage.removeItem(INDICATOR_CHART_RANGE_STORAGE_KEY);
+      localStorage.removeItem(INDICATOR_CHART_NOTES_STORAGE_KEY);
+      localStorage.removeItem(FEAR_GREED_HISTORY_STORAGE_KEY);
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
       INDICATOR_CHART_DRAG_STATE = null;
@@ -3650,12 +3863,24 @@ function generateWeeklyMarketReportPayload(data) {
   const keyPositive = live.axes.filter(axis => axis.status === "positive").slice(0, 4).map(axis => axis.name);
   const keyNegative = live.axes.filter(axis => axis.status === "negative").slice(0, 4).map(axis => axis.name);
   const conflict = live.conflictAxes.map(axis => axis.name).slice(0, 4);
+  const fearGreedRecord = currentFearGreedRecord();
+  if (fearGreedRecord) {
+    appendFearGreedHistory({
+      ...fearGreedRecord,
+      checkedAt: fearGreedRecord.checkedAt || date,
+      source: "리포트 생성"
+    });
+  }
+  const fearGreedLine = fearGreedRecord
+    ? `Fear & Greed Index: ${fearGreedRecord.value} · ${labelStatus(fearGreedRecord.signal)} · 확인일 ${fearGreedRecord.checkedAt || "미기록"}${fearGreedRecord.note ? ` · ${fearGreedRecord.note}` : ""}`
+    : "Fear & Greed Index: 저장 기록 없음";
 
   const sections = [];
   sections.push(`주간 시장 리포트 · ${date}`);
   sections.push(`\n1. 한 줄 결론\n현재 시장은 ${scoreLineFromLive(live)} 기준으로 '${live.regime}'에 가깝다. 실행 바이어스는 '${live.actionBias}'이며, ${live.cashGuide}`);
   sections.push(`\n2. 8축 신호 요약\n긍정 축: ${axisNamesByStatus(live, "positive")}\n중립 축: ${axisNamesByStatus(live, "neutral")}\n부정 축: ${axisNamesByStatus(live, "negative")}\n축 내부 충돌: ${conflict.length ? conflict.join(", ") : "뚜렷한 충돌 없음"}`);
-  sections.push(`\n3. 핵심 자동 지표\n- 금리/유동성: ${formatReportMetric(data, "us_10y_yield")}, ${formatReportMetric(data, "real_10y_yield")}, ${formatReportMetric(data, "ten_two_spread")}\n- 고용: ${formatReportMetric(data, "initial_claims")}, ${formatReportMetric(data, "unemployment_rate")}, ${formatReportMetric(data, "nonfarm_payrolls")}\n- 소비/물가: ${formatReportMetric(data, "retail_sales_yoy")}, ${formatReportMetric(data, "cpi_yoy")}, ${formatReportMetric(data, "real_retail_sales_proxy")}\n- 변동성/자금: ${formatReportMetric(data, "vix")}, ${formatReportMetric(data, "vix_futures_structure")}, ${formatReportMetric(data, "spy_flow_proxy")}, ${formatReportMetric(data, "sqqq_flow_proxy")}`);
+  sections.push(`\n3. 핵심 자동 지표\n- 금리/유동성: ${formatReportMetric(data, "us_10y_yield")}, ${formatReportMetric(data, "real_10y_yield")}, ${formatReportMetric(data, "ten_two_spread")}\n- 고용: ${formatReportMetric(data, "initial_claims")}, ${formatReportMetric(data, "unemployment_rate")}, ${formatReportMetric(data, "nonfarm_payrolls")}\n- 소비/물가: ${formatReportMetric(data, "retail_sales_yoy")}, ${formatReportMetric(data, "cpi_yoy")}, ${formatReportMetric(data, "real_retail_sales_proxy")}\n- 변동성/자금: ${formatReportMetric(data, "vix")}, ${formatReportMetric(data, "vix_futures_structure")}, ${formatReportMetric(data, "spy_flow_proxy")}, ${formatReportMetric(data, "sqqq_flow_proxy")}
+- 수동 심리 기록: ${fearGreedLine}`);
   sections.push(`\n4. FactSet 실적 시즌 해석\n${buildFactSetSummary(data)}`);
   sections.push(`\n5. Investing.com 인기 뉴스 3개와 내러티브\n${buildNewsNarrative(newsItems)}`);
 
@@ -3686,6 +3911,7 @@ function generateWeeklyMarketReportPayload(data) {
     actionBias: live.actionBias,
     cashGuide: live.cashGuide,
     newsItems,
+    fearGreedSnapshot: fearGreedRecord,
     reportText
   };
 }
@@ -4125,6 +4351,7 @@ function setupEconomicEventHandlers() {
 const INDICATOR_DRAWINGS_STORAGE_KEY = "eightAxisIndicatorDrawingsV1";
 const INDICATOR_CHART_STATE_STORAGE_KEY = "eightAxisIndicatorChartStateV1";
 const INDICATOR_CHART_RANGE_STORAGE_KEY = "eightAxisIndicatorChartRangesV1";
+const INDICATOR_CHART_NOTES_STORAGE_KEY = "eightAxisIndicatorChartNotesV1";
 
 let INDICATOR_CHART_RUNTIME = null;
 let INDICATOR_CHART_PENDING_POINT = null;
@@ -4139,6 +4366,36 @@ function readIndicatorDrawings() {
 
 function writeIndicatorDrawings(drawings) {
   writeJsonStorage(INDICATOR_DRAWINGS_STORAGE_KEY, drawings || {});
+}
+
+function readIndicatorChartNotes() {
+  const notes = readJsonStorage(INDICATOR_CHART_NOTES_STORAGE_KEY, {});
+  return notes && typeof notes === "object" && !Array.isArray(notes) ? notes : {};
+}
+
+function readIndicatorChartNote(indicatorId) {
+  const note = readIndicatorChartNotes()[indicatorId];
+  return note && typeof note === "object" ? note : { text: "", updatedAt: "" };
+}
+
+function writeIndicatorChartNote(indicatorId, text) {
+  const notes = readIndicatorChartNotes();
+  const cleanText = String(text || "").trim();
+  if (cleanText) {
+    notes[indicatorId] = { text: cleanText, updatedAt: new Date().toISOString() };
+  } else {
+    delete notes[indicatorId];
+  }
+  writeJsonStorage(INDICATOR_CHART_NOTES_STORAGE_KEY, notes);
+}
+
+function writeIndicatorChartNotes(notes) {
+  const clean = {};
+  Object.entries(notes || {}).forEach(([indicatorId, note]) => {
+    const text = String(note?.text || "").trim();
+    if (text) clean[indicatorId] = { text, updatedAt: note?.updatedAt || "" };
+  });
+  writeJsonStorage(INDICATOR_CHART_NOTES_STORAGE_KEY, clean);
 }
 
 function readIndicatorChartRanges() {
@@ -4228,7 +4485,10 @@ function getIndicatorChartSeries(data, history, indicatorId) {
   const rows = [];
   getHistorySnapshots(history).forEach((snapshot, index) => {
     const item = getSnapshotIndicator(snapshot, indicatorId);
-    const value = Number(item?.currentValue);
+    const rawValue = indicatorId === "nonfarm_payrolls"
+      ? normalizeNonfarmPayrollNumber(item?.currentValue, item?.unit)
+      : item?.currentValue;
+    const value = Number(rawValue);
     if (!Number.isFinite(value)) return;
     rows.push({
       time: parseChartTimestamp(snapshot.date || snapshot.updatedAt, index),
@@ -4310,6 +4570,7 @@ function renderIndicatorChartView(data, history) {
   const series = getIndicatorChartSeries(data, history, selected.id);
   const drawings = indicatorDrawingsFor(selected.id);
   const yRange = readIndicatorChartRange(selected.id);
+  const chartNote = readIndicatorChartNote(selected.id);
 
   panel.innerHTML = `
     <div class="indicator-chart-shell">
@@ -4374,6 +4635,22 @@ function renderIndicatorChartView(data, history) {
         <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "추세선 몸통을 드래그하면 선 전체가 이동하고, 양 끝점을 드래그하면 기울기가 수정됩니다. 수평선도 선 자체를 위아래로 드래그할 수 있습니다."}</span>
         <span>작도와 Y축 범위는 이 브라우저에 자동 저장됩니다.</span>
       </div>
+
+      <section class="indicator-chart-note-panel">
+        <div class="indicator-chart-note-head">
+          <div>
+            <strong>차트 분석 메모</strong>
+            <span>선택한 지표별로 따로 저장됩니다.</span>
+          </div>
+          <span id="indicatorChartNoteSavedAt">${chartNote.updatedAt ? `마지막 저장 ${escapeHtml(formatChartTooltipDate(chartNote.updatedAt))}` : "저장 기록 없음"}</span>
+        </div>
+        <textarea id="indicatorChartNote" rows="7" placeholder="현재 추세, 작도 근거, 다음 확인 구간, 리스크 요인 등을 직접 입력하세요.">${escapeHtml(chartNote.text || "")}</textarea>
+        <div class="indicator-chart-note-actions">
+          <button type="button" id="saveIndicatorChartNote">메모 저장</button>
+          <button type="button" id="clearIndicatorChartNote">메모 삭제</button>
+          <span id="indicatorChartNoteStatus" class="muted">Ctrl/Command + Enter로도 저장할 수 있습니다.</span>
+        </div>
+      </section>
     </div>
   `;
 
@@ -4979,6 +5256,38 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       if (event.key === "Enter") applyYRange?.click();
     };
   });
+
+  const chartNoteInput = $("indicatorChartNote");
+  const saveChartNote = $("saveIndicatorChartNote");
+  const clearChartNote = $("clearIndicatorChartNote");
+  const chartNoteStatus = $("indicatorChartNoteStatus");
+
+  const saveCurrentChartNote = () => {
+    writeIndicatorChartNote(indicatorId, chartNoteInput?.value || "");
+    if (chartNoteStatus) chartNoteStatus.textContent = "메모를 저장했습니다.";
+    const savedAt = $("indicatorChartNoteSavedAt");
+    if (savedAt) savedAt.textContent = `마지막 저장 ${formatChartTooltipDate(new Date().toISOString())}`;
+  };
+
+  if (saveChartNote) saveChartNote.onclick = saveCurrentChartNote;
+  if (clearChartNote) {
+    clearChartNote.onclick = () => {
+      if (!confirm("이 지표의 차트 메모를 삭제할까요?")) return;
+      if (chartNoteInput) chartNoteInput.value = "";
+      writeIndicatorChartNote(indicatorId, "");
+      if (chartNoteStatus) chartNoteStatus.textContent = "메모를 삭제했습니다.";
+      const savedAt = $("indicatorChartNoteSavedAt");
+      if (savedAt) savedAt.textContent = "저장 기록 없음";
+    };
+  }
+  if (chartNoteInput) {
+    chartNoteInput.onkeydown = event => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        saveCurrentChartNote();
+      }
+    };
+  }
 
   const undo = $("undoIndicatorDrawing");
   if (undo) {
@@ -5731,7 +6040,8 @@ async function init() {
       APP_HISTORY_DATA = null;
     }
 
-    APP_RAW_DATA = data;
+    migrateFearGreedOverrideToHistory();
+    APP_RAW_DATA = normalizeIndicatorUnits(data);
     APP_VIEW_DATA = applyManualOverrides(APP_RAW_DATA);
     renderAll(APP_VIEW_DATA);
   } catch (error) {
