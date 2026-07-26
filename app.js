@@ -4166,7 +4166,10 @@ function renderChecklistPanel() {
             </span>
             <span class="checklist-date">${state.doneAt ? `완료 ${escapeHtml(state.doneAt.slice(0, 10))}` : "미완료"}</span>
           </label>
-          <textarea class="manual-input checklist-note" data-checklist-note="${escapeHtml(item.id)}" rows="2" placeholder="이 항목에 대한 짧은 메모">${escapeHtml(state.note || "")}</textarea>
+          <div class="checklist-note-row">
+            <textarea class="manual-input checklist-note" data-checklist-note="${escapeHtml(item.id)}" rows="2" placeholder="이 항목에 대한 짧은 메모">${escapeHtml(state.note || "")}</textarea>
+            <button type="button" class="checklist-note-expand" data-checklist-note-open="${escapeHtml(item.id)}">확대</button>
+          </div>
         `;
       }).join("")}
     </div>
@@ -4184,6 +4187,24 @@ function renderChecklistPanel() {
       ${groupHtml}
       <div class="weekly-review-actions">
         <button type="button" class="review-delete" id="resetChecklistStatus">체크리스트 초기화</button>
+      </div>
+
+      <div class="checklist-note-modal hidden" id="checklistNoteModal" role="dialog" aria-modal="true" aria-labelledby="checklistNoteModalTitle">
+        <div class="checklist-note-modal-panel">
+          <div class="checklist-note-modal-head">
+            <div>
+              <p class="eyebrow">Checklist Note</p>
+              <h3 id="checklistNoteModalTitle">체크리스트 메모</h3>
+              <p class="muted" id="checklistNoteModalMeta"></p>
+            </div>
+            <button type="button" class="checklist-note-modal-close" data-checklist-note-close aria-label="메모 확대 화면 닫기">×</button>
+          </div>
+          <textarea class="manual-input checklist-note-modal-textarea" id="checklistNoteModalTextarea" placeholder="판단 근거, 확인한 데이터, 다음 점검 사항을 충분히 기록하세요."></textarea>
+          <div class="checklist-note-modal-actions">
+            <button type="button" class="backup-secondary" data-checklist-note-close>취소</button>
+            <button type="button" class="review-save" id="saveChecklistNoteModal">메모 저장</button>
+          </div>
+        </div>
       </div>
     </section>
   `;
@@ -4218,6 +4239,68 @@ function setupChecklistHandlers() {
       writeChecklistStatus(state);
     };
   });
+
+  const noteModal = $("checklistNoteModal");
+  const noteModalTextarea = $("checklistNoteModalTextarea");
+  const noteModalTitle = $("checklistNoteModalTitle");
+  const noteModalMeta = $("checklistNoteModalMeta");
+
+  const closeChecklistNoteModal = () => {
+    if (!noteModal) return;
+    noteModal.classList.add("hidden");
+    noteModal.dataset.checklistId = "";
+    document.body.classList.remove("checklist-note-modal-open");
+  };
+
+  document.querySelectorAll("[data-checklist-note-open]").forEach(button => {
+    button.onclick = () => {
+      if (!noteModal || !noteModalTextarea) return;
+      const id = button.dataset.checklistNoteOpen;
+      const item = DEFAULT_CHECKLIST_ITEMS.find(entry => entry.id === id);
+      const source = document.querySelector(`[data-checklist-note="${CSS.escape(id)}"]`);
+
+      noteModal.dataset.checklistId = id;
+      noteModalTextarea.value = source?.value || readChecklistStatus()[id]?.note || "";
+      if (noteModalTitle) noteModalTitle.textContent = item?.label || "체크리스트 메모";
+      if (noteModalMeta) noteModalMeta.textContent = item ? `${item.group} · ${item.cadence}` : "체크리스트 메모";
+      noteModal.classList.remove("hidden");
+      document.body.classList.add("checklist-note-modal-open");
+      requestAnimationFrame(() => noteModalTextarea.focus());
+    };
+  });
+
+  document.querySelectorAll("[data-checklist-note-close]").forEach(button => {
+    button.onclick = closeChecklistNoteModal;
+  });
+
+  if (noteModal) {
+    noteModal.onclick = event => {
+      if (event.target === noteModal) closeChecklistNoteModal();
+    };
+    noteModal.onkeydown = event => {
+      if (event.key === "Escape") closeChecklistNoteModal();
+    };
+  }
+
+  const saveExpandedNote = $("saveChecklistNoteModal");
+  if (saveExpandedNote) {
+    saveExpandedNote.onclick = () => {
+      const id = noteModal?.dataset.checklistId;
+      if (!id || !noteModalTextarea) return;
+      const note = noteModalTextarea.value;
+      const state = readChecklistStatus();
+      state[id] = {
+        ...(state[id] || {}),
+        note,
+        updatedAt: new Date().toISOString()
+      };
+      writeChecklistStatus(state);
+
+      const source = document.querySelector(`[data-checklist-note="${CSS.escape(id)}"]`);
+      if (source) source.value = note;
+      closeChecklistNoteModal();
+    };
+  }
 
   const reset = $("resetChecklistStatus");
   if (reset) {
