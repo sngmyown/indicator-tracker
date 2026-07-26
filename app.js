@@ -4436,10 +4436,20 @@ const INDICATOR_CHART_STATE_STORAGE_KEY = "eightAxisIndicatorChartStateV1";
 const INDICATOR_CHART_RANGE_STORAGE_KEY = "eightAxisIndicatorChartRangesV1";
 const INDICATOR_CHART_NOTES_STORAGE_KEY = "eightAxisIndicatorChartNotesV1";
 
+const INDICATOR_TEXT_COLORS = {
+  blue: { label: "파랑", value: "#60a5fa" },
+  white: { label: "하양", value: "#ffffff" },
+  red: { label: "빨강", value: "#f87171" },
+  green: { label: "초록", value: "#4ade80" },
+  yellow: { label: "노랑", value: "#facc15" },
+  orange: { label: "주황", value: "#fb923c" }
+};
+
 let INDICATOR_CHART_RUNTIME = null;
 let INDICATOR_CHART_PENDING_POINT = null;
 let INDICATOR_CHART_SELECTED_DRAWING_ID = null;
 let INDICATOR_CHART_DRAG_STATE = null;
+let INDICATOR_CHART_TEXT_EDITOR_STATE = null;
 let INDICATOR_CHART_RESIZE_BOUND = false;
 
 function readIndicatorDrawings() {
@@ -4527,14 +4537,16 @@ function readIndicatorChartState(data = APP_VIEW_DATA) {
   });
   const fallbackId = candidates[0]?.id || "";
   const indicatorId = candidates.some(item => item.id === saved.indicatorId) ? saved.indicatorId : fallbackId;
-  const mode = ["select", "trend", "horizontal"].includes(saved.mode) ? saved.mode : "select";
-  return { indicatorId, mode };
+  const mode = ["select", "trend", "horizontal", "text"].includes(saved.mode) ? saved.mode : "select";
+  const textColor = INDICATOR_TEXT_COLORS[saved.textColor] ? saved.textColor : "blue";
+  return { indicatorId, mode, textColor };
 }
 
 function writeIndicatorChartState(state) {
   writeJsonStorage(INDICATOR_CHART_STATE_STORAGE_KEY, {
     indicatorId: state?.indicatorId || "",
-    mode: ["select", "trend", "horizontal"].includes(state?.mode) ? state.mode : "select"
+    mode: ["select", "trend", "horizontal", "text"].includes(state?.mode) ? state.mode : "select",
+    textColor: INDICATOR_TEXT_COLORS[state?.textColor] ? state.textColor : "blue"
   });
 }
 
@@ -4672,10 +4684,23 @@ function renderIndicatorChartView(data, history) {
           <button type="button" data-chart-mode="select" class="${state.mode === "select" ? "active" : ""}">선택·이동</button>
           <button type="button" data-chart-mode="trend" class="${state.mode === "trend" ? "active" : ""}">추세선</button>
           <button type="button" data-chart-mode="horizontal" class="${state.mode === "horizontal" ? "active" : ""}">수평선</button>
+          <button type="button" data-chart-mode="text" class="${state.mode === "text" ? "active" : ""}">텍스트</button>
           <button type="button" id="undoIndicatorDrawing" ${drawings.length ? "" : "disabled"}>마지막 취소</button>
           <button type="button" id="deleteIndicatorDrawing" ${INDICATOR_CHART_SELECTED_DRAWING_ID ? "" : "disabled"}>선택 삭제</button>
           <button type="button" id="clearIndicatorDrawings" ${drawings.length ? "" : "disabled"}>전체 삭제</button>
         </div>
+      </div>
+
+      <div class="indicator-text-color-controls" aria-label="텍스트 박스 글자 색상">
+        <span>텍스트 색상</span>
+        <div class="indicator-text-color-palette">
+          ${Object.entries(INDICATOR_TEXT_COLORS).map(([key, color]) => `
+            <button type="button" data-chart-text-color="${key}" class="${state.textColor === key ? "active" : ""}" title="${color.label}" aria-label="텍스트 색상 ${color.label}">
+              <i style="background:${color.value}"></i>${color.label}
+            </button>
+          `).join("")}
+        </div>
+        <small>새 텍스트 박스에 적용됩니다. 기존 텍스트는 더블클릭하여 색상을 바꿀 수 있습니다.</small>
       </div>
 
       <div class="indicator-y-range-controls" aria-label="Y축 범위 설정">
@@ -4710,13 +4735,40 @@ function renderIndicatorChartView(data, history) {
 
       <div class="indicator-chart-stage" id="indicatorChartStage">
         <canvas id="indicatorChartCanvas" aria-label="${escapeHtml(selected.name)} 시계열 차트"></canvas>
-        <div class="indicator-chart-help" id="indicatorChartHelp">선택·이동 모드: 선 자체를 드래그해 이동하고, 추세선 끝점을 드래그해 기울기를 수정합니다.</div>
+        <div class="indicator-chart-help" id="indicatorChartHelp">선택·이동 모드: 선과 텍스트 박스를 드래그해 이동하고, 텍스트 박스는 더블클릭해 수정합니다.</div>
         <div class="indicator-chart-tooltip hidden" id="indicatorChartTooltip" role="status"></div>
       </div>
 
       <div class="indicator-chart-status">
-        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : "추세선 몸통을 드래그하면 선 전체가 이동하고, 양 끝점을 드래그하면 기울기가 수정됩니다. 수평선도 선 자체를 위아래로 드래그할 수 있습니다."}</span>
-        <span>작도와 Y축 범위는 이 브라우저에 자동 저장됩니다.</span>
+        <span id="indicatorChartStatus">${state.mode === "trend" ? "차트에서 시작점과 끝점을 차례로 선택하세요." : state.mode === "horizontal" ? "차트에서 원하는 값 위치를 선택하세요." : state.mode === "text" ? "색상을 고른 뒤 차트에서 텍스트 박스를 놓을 위치를 선택하세요." : "선과 텍스트 박스는 드래그해 이동할 수 있습니다. 텍스트 박스는 더블클릭하면 내용과 색상을 수정할 수 있습니다."}</span>
+        <span>작도, 텍스트 박스와 Y축 범위는 이 브라우저에 자동 저장됩니다.</span>
+      </div>
+
+      <div class="indicator-text-editor hidden" id="indicatorTextEditor" role="dialog" aria-modal="true" aria-labelledby="indicatorTextEditorTitle">
+        <div class="indicator-text-editor-panel">
+          <div class="indicator-text-editor-head">
+            <div>
+              <h3 id="indicatorTextEditorTitle">텍스트 박스 만들기</h3>
+              <p class="muted">차트 위에 표시할 커멘트를 입력하세요.</p>
+            </div>
+            <button type="button" id="closeIndicatorTextEditor" aria-label="텍스트 편집 닫기">×</button>
+          </div>
+          <textarea id="indicatorTextEditorInput" rows="7" maxlength="600" placeholder="예: 실질금리 하락 확인 전까지 추가 매수 보류"></textarea>
+          <div class="indicator-text-editor-colors">
+            <span>글자 색상</span>
+            <div class="indicator-text-editor-palette">
+              ${Object.entries(INDICATOR_TEXT_COLORS).map(([key, color]) => `
+                <button type="button" data-editor-text-color="${key}" title="${color.label}" aria-label="글자 색상 ${color.label}">
+                  <i style="background:${color.value}"></i>${color.label}
+                </button>
+              `).join("")}
+            </div>
+          </div>
+          <div class="indicator-text-editor-actions">
+            <button type="button" id="cancelIndicatorTextEditor">취소</button>
+            <button type="button" id="saveIndicatorTextEditor">텍스트 저장</button>
+          </div>
+        </div>
       </div>
 
       <section class="indicator-chart-note-panel">
@@ -4761,9 +4813,13 @@ function chartCanvasGeometry(canvas, series, drawings, manualRange = null) {
 
   const values = series.map(row => row.value);
   drawings.forEach(drawing => {
-    if (Number.isFinite(Number(drawing.y1))) values.push(Number(drawing.y1));
-    if (Number.isFinite(Number(drawing.y2))) values.push(Number(drawing.y2));
-    if (Number.isFinite(Number(drawing.value))) values.push(Number(drawing.value));
+    if (drawing.type === "trend") {
+      if (Number.isFinite(Number(drawing.y1))) values.push(Number(drawing.y1));
+      if (Number.isFinite(Number(drawing.y2))) values.push(Number(drawing.y2));
+    }
+    if ((drawing.type === "horizontal" || drawing.type === "text") && Number.isFinite(Number(drawing.value))) {
+      values.push(Number(drawing.value));
+    }
   });
 
   let minValue;
@@ -4848,6 +4904,106 @@ function drawIndicatorChartHandle(context, x, y, color = "#ffffff") {
   context.restore();
 }
 
+function indicatorTextColorValue(colorKey) {
+  return INDICATOR_TEXT_COLORS[colorKey]?.value || INDICATOR_TEXT_COLORS.blue.value;
+}
+
+function roundedRectPath(context, x, y, width, height, radius = 10) {
+  const r = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.arcTo(x + width, y, x + width, y + height, r);
+  context.arcTo(x + width, y + height, x, y + height, r);
+  context.arcTo(x, y + height, x, y, r);
+  context.arcTo(x, y, x + width, y, r);
+  context.closePath();
+}
+
+function wrapIndicatorText(context, text, maxWidth) {
+  const paragraphs = String(text || "").replace(/\r/g, "").split("\n");
+  const lines = [];
+
+  paragraphs.forEach(paragraph => {
+    if (!paragraph) {
+      lines.push("");
+      return;
+    }
+
+    const words = paragraph.split(/\s+/);
+    let line = "";
+    words.forEach(word => {
+      const candidate = line ? `${line} ${word}` : word;
+      if (context.measureText(candidate).width <= maxWidth) {
+        line = candidate;
+        return;
+      }
+
+      if (line) lines.push(line);
+      if (context.measureText(word).width <= maxWidth) {
+        line = word;
+        return;
+      }
+
+      let chunk = "";
+      Array.from(word).forEach(character => {
+        const next = chunk + character;
+        if (context.measureText(next).width > maxWidth && chunk) {
+          lines.push(chunk);
+          chunk = character;
+        } else {
+          chunk = next;
+        }
+      });
+      line = chunk;
+    });
+    if (line) lines.push(line);
+  });
+
+  return lines.length ? lines : [""];
+}
+
+function drawIndicatorTextBox(context, drawing, selected, g) {
+  const color = indicatorTextColorValue(drawing.color);
+  const width = Math.max(150, Math.min(Number(drawing.width) || 230, Math.max(150, g.plotWidth - 16)));
+  const paddingX = 12;
+  const paddingY = 10;
+  const lineHeight = 20;
+
+  context.save();
+  context.setLineDash([]);
+  context.font = "700 14px system-ui, sans-serif";
+  context.textBaseline = "top";
+  context.textAlign = "left";
+  const lines = wrapIndicatorText(context, drawing.text, width - paddingX * 2);
+  const height = Math.max(42, paddingY * 2 + lines.length * lineHeight);
+  const rawX = g.xToPixel(Number(drawing.time));
+  const rawY = g.yToPixel(Number(drawing.value));
+  const x = Math.max(g.padding.left + 4, Math.min(g.width - g.padding.right - width - 4, rawX));
+  const y = Math.max(g.padding.top + 4, Math.min(g.height - g.padding.bottom - height - 4, rawY));
+
+  roundedRectPath(context, x, y, width, height, 11);
+  context.fillStyle = "rgba(6, 9, 20, 0.88)";
+  context.fill();
+  context.strokeStyle = selected ? "#ffffff" : color;
+  context.lineWidth = selected ? 2.5 : 1.5;
+  context.stroke();
+
+  context.fillStyle = color;
+  lines.forEach((line, index) => {
+    context.fillText(line, x + paddingX, y + paddingY + index * lineHeight);
+  });
+
+  if (selected) {
+    context.beginPath();
+    context.arc(x + width - 8, y + 8, 4, 0, Math.PI * 2);
+    context.fillStyle = color;
+    context.fill();
+  }
+
+  context.restore();
+  return { id: drawing.id, x, y, width, height };
+}
+
 function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = null) {
   const canvas = $("indicatorChartCanvas");
   if (!canvas) return;
@@ -4863,7 +5019,8 @@ function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = n
     drawings,
     geometry: g,
     indicatorName: selectedIndicator?.name || indicatorId,
-    unit: selectedIndicator?.unit || ""
+    unit: selectedIndicator?.unit || "",
+    textBoxes: []
   };
 
   context.clearRect(0, 0, g.width, g.height);
@@ -4950,7 +5107,7 @@ function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = n
       if (selected) {
         drawIndicatorChartHandle(context, g.width - g.padding.right - 10, y, "#37d67a");
       }
-    } else {
+    } else if (drawing.type === "trend") {
       const x1 = g.xToPixel(Number(drawing.x1));
       const y1 = g.yToPixel(Number(drawing.y1));
       const x2 = g.xToPixel(Number(drawing.x2));
@@ -4962,6 +5119,9 @@ function renderIndicatorChartCanvas(data, history, indicatorId, previewPoint = n
         drawIndicatorChartHandle(context, x1, y1, "#ffd166");
         drawIndicatorChartHandle(context, x2, y2, "#ffd166");
       }
+    } else if (drawing.type === "text") {
+      const bounds = drawIndicatorTextBox(context, drawing, selected, g);
+      INDICATOR_CHART_RUNTIME.textBoxes.push(bounds);
     }
   });
 
@@ -5022,11 +5182,11 @@ function findNearestIndicatorDrawing(pointer, maxDistance = 15) {
   let nearest = null;
   let nearestDistance = Infinity;
 
-  INDICATOR_CHART_RUNTIME.drawings.forEach(drawing => {
-    let distance;
+  [...INDICATOR_CHART_RUNTIME.drawings].reverse().forEach(drawing => {
+    let distance = Infinity;
     if (drawing.type === "horizontal") {
       distance = Math.abs(pointer.pixelY - g.yToPixel(Number(drawing.value)));
-    } else {
+    } else if (drawing.type === "trend") {
       distance = pointSegmentDistance(
         pointer.pixelX,
         pointer.pixelY,
@@ -5035,6 +5195,13 @@ function findNearestIndicatorDrawing(pointer, maxDistance = 15) {
         g.xToPixel(Number(drawing.x2)),
         g.yToPixel(Number(drawing.y2))
       );
+    } else if (drawing.type === "text") {
+      const box = INDICATOR_CHART_RUNTIME.textBoxes.find(item => item.id === drawing.id);
+      if (box) {
+        const dx = Math.max(box.x - pointer.pixelX, 0, pointer.pixelX - (box.x + box.width));
+        const dy = Math.max(box.y - pointer.pixelY, 0, pointer.pixelY - (box.y + box.height));
+        distance = Math.hypot(dx, dy);
+      }
     }
     if (distance < nearestDistance) {
       nearestDistance = distance;
@@ -5127,6 +5294,81 @@ function updateIndicatorChartTooltip(pointer) {
   tooltip.style.top = `${top}px`;
 }
 
+function setIndicatorTextEditorColor(colorKey) {
+  if (!INDICATOR_CHART_TEXT_EDITOR_STATE) return;
+  INDICATOR_CHART_TEXT_EDITOR_STATE.color = INDICATOR_TEXT_COLORS[colorKey] ? colorKey : "blue";
+  document.querySelectorAll("[data-editor-text-color]").forEach(button => {
+    button.classList.toggle("active", button.dataset.editorTextColor === INDICATOR_CHART_TEXT_EDITOR_STATE.color);
+  });
+}
+
+function closeIndicatorTextEditor() {
+  const editor = $("indicatorTextEditor");
+  if (editor) editor.classList.add("hidden");
+  document.body.classList.remove("indicator-text-editor-open");
+  INDICATOR_CHART_TEXT_EDITOR_STATE = null;
+}
+
+function openIndicatorTextEditor(indicatorId, options = {}) {
+  const editor = $("indicatorTextEditor");
+  const input = $("indicatorTextEditorInput");
+  const title = $("indicatorTextEditorTitle");
+  if (!editor || !input) return;
+
+  const drawings = indicatorDrawingsFor(indicatorId);
+  const existing = options.drawingId ? drawings.find(item => item.id === options.drawingId && item.type === "text") : null;
+  const chartState = readIndicatorChartState(APP_VIEW_DATA);
+  INDICATOR_CHART_TEXT_EDITOR_STATE = {
+    indicatorId,
+    drawingId: existing?.id || null,
+    time: existing ? Number(existing.time) : Number(options.point?.time),
+    value: existing ? Number(existing.value) : Number(options.point?.value),
+    color: INDICATOR_TEXT_COLORS[existing?.color] ? existing.color : chartState.textColor
+  };
+
+  input.value = existing?.text || "";
+  if (title) title.textContent = existing ? "텍스트 박스 수정" : "텍스트 박스 만들기";
+  setIndicatorTextEditorColor(INDICATOR_CHART_TEXT_EDITOR_STATE.color);
+  editor.classList.remove("hidden");
+  document.body.classList.add("indicator-text-editor-open");
+  requestAnimationFrame(() => input.focus());
+}
+
+function saveIndicatorTextEditor() {
+  const state = INDICATOR_CHART_TEXT_EDITOR_STATE;
+  const input = $("indicatorTextEditorInput");
+  if (!state || !input) return;
+  const text = input.value.trim();
+  if (!text) {
+    alert("텍스트 박스에 표시할 내용을 입력하세요.");
+    input.focus();
+    return;
+  }
+
+  const drawings = indicatorDrawingsFor(state.indicatorId);
+  if (state.drawingId) {
+    const drawing = drawings.find(item => item.id === state.drawingId && item.type === "text");
+    if (!drawing) return;
+    drawing.text = text;
+    drawing.color = state.color;
+  } else {
+    drawings.push({
+      id: `drawing-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      type: "text",
+      time: state.time,
+      value: state.value,
+      text,
+      color: state.color,
+      width: 230
+    });
+  }
+
+  writeIndicatorDrawingsFor(state.indicatorId, drawings);
+  INDICATOR_CHART_SELECTED_DRAWING_ID = state.drawingId || drawings[drawings.length - 1]?.id || null;
+  closeIndicatorTextEditor();
+  refreshIndicatorChart(APP_VIEW_DATA, APP_HISTORY_DATA);
+}
+
 function cloneIndicatorDrawings(drawings) {
   return drawings.map(item => ({ ...item }));
 }
@@ -5163,6 +5405,8 @@ function beginIndicatorDrawingDrag(canvas, event, indicatorId, pointer, target) 
   if (status) {
     if (target.type === "horizontal") {
       status.textContent = "수평선 전체를 위아래로 이동 중입니다.";
+    } else if (target.type === "text") {
+      status.textContent = "텍스트 박스를 이동 중입니다. 더블클릭하면 내용과 색상을 수정할 수 있습니다.";
     } else if (target.handle === "start" || target.handle === "end") {
       status.textContent = "추세선 끝점을 이동해 길이와 기울기를 수정 중입니다.";
     } else {
@@ -5186,6 +5430,14 @@ function updateIndicatorDrawingDrag(point) {
 
   if (drag.type === "horizontal") {
     const deltaValue = point.value - drag.startPointer.value;
+    drawing.value = Math.max(g.minValue, Math.min(g.maxValue, Number(original.value) + deltaValue));
+    return;
+  }
+
+  if (drag.type === "text") {
+    const deltaTime = point.time - drag.startPointer.time;
+    const deltaValue = point.value - drag.startPointer.value;
+    drawing.time = Math.max(g.minTime, Math.min(g.maxTime, Number(original.time) + deltaTime));
     drawing.value = Math.max(g.minValue, Math.min(g.maxValue, Number(original.value) + deltaValue));
     return;
   }
@@ -5232,7 +5484,7 @@ function finishIndicatorDrawingDrag(commit = true) {
   if (canvas) canvas.style.cursor = "default";
   const status = $("indicatorChartStatus");
   if (status) status.textContent = commit
-    ? "작도 위치를 저장했습니다. 선 자체 또는 끝점을 다시 드래그해 계속 수정할 수 있습니다."
+    ? "작도 위치를 저장했습니다. 선·끝점·텍스트 박스를 다시 드래그해 계속 수정할 수 있습니다."
     : "작도 이동을 취소했습니다.";
   renderIndicatorChartCanvas(APP_VIEW_DATA, APP_HISTORY_DATA, drag.indicatorId);
 }
@@ -5280,7 +5532,8 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
       INDICATOR_CHART_DRAG_STATE = null;
-      writeIndicatorChartState({ indicatorId: select.value, mode: state.mode });
+      const currentState = readIndicatorChartState(data);
+      writeIndicatorChartState({ indicatorId: select.value, mode: currentState.mode, textColor: currentState.textColor });
       refreshIndicatorChart(data, history);
     };
   }
@@ -5291,10 +5544,49 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
       INDICATOR_CHART_PENDING_POINT = null;
       INDICATOR_CHART_SELECTED_DRAWING_ID = null;
       INDICATOR_CHART_DRAG_STATE = null;
-      writeIndicatorChartState({ indicatorId, mode: nextMode });
+      const currentState = readIndicatorChartState(data);
+      writeIndicatorChartState({ indicatorId, mode: nextMode, textColor: currentState.textColor });
       refreshIndicatorChart(data, history);
     };
   });
+
+  document.querySelectorAll("[data-chart-text-color]").forEach(button => {
+    button.onclick = () => {
+      const textColor = button.dataset.chartTextColor;
+      const currentState = readIndicatorChartState(data);
+      writeIndicatorChartState({ indicatorId, mode: currentState.mode, textColor });
+      document.querySelectorAll("[data-chart-text-color]").forEach(item => {
+        item.classList.toggle("active", item.dataset.chartTextColor === textColor);
+      });
+      const status = $("indicatorChartStatus");
+      if (status) status.textContent = `${INDICATOR_TEXT_COLORS[textColor]?.label || "파랑"}색을 선택했습니다. 텍스트 도구로 차트를 클릭하세요.`;
+    };
+  });
+
+  document.querySelectorAll("[data-editor-text-color]").forEach(button => {
+    button.onclick = () => setIndicatorTextEditorColor(button.dataset.editorTextColor);
+  });
+  const saveTextEditor = $("saveIndicatorTextEditor");
+  const cancelTextEditor = $("cancelIndicatorTextEditor");
+  const closeTextEditor = $("closeIndicatorTextEditor");
+  const textEditor = $("indicatorTextEditor");
+  const textEditorInput = $("indicatorTextEditorInput");
+  if (saveTextEditor) saveTextEditor.onclick = saveIndicatorTextEditor;
+  if (cancelTextEditor) cancelTextEditor.onclick = closeIndicatorTextEditor;
+  if (closeTextEditor) closeTextEditor.onclick = closeIndicatorTextEditor;
+  if (textEditor) {
+    textEditor.onclick = event => {
+      if (event.target === textEditor) closeIndicatorTextEditor();
+    };
+  }
+  if (textEditorInput) {
+    textEditorInput.onkeydown = event => {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        saveIndicatorTextEditor();
+      }
+    };
+  }
 
   const applyYRange = $("applyIndicatorYRange");
   if (applyYRange) {
@@ -5425,6 +5717,11 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
         return;
       }
 
+      if (currentState.mode === "text") {
+        openIndicatorTextEditor(indicatorId, { point });
+        return;
+      }
+
       if (currentState.mode === "trend") {
         if (!INDICATOR_CHART_PENDING_POINT) {
           INDICATOR_CHART_PENDING_POINT = { time: point.time, value: point.value };
@@ -5477,6 +5774,14 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
         return;
       }
 
+      if (nearest?.type === "text") {
+        beginIndicatorDrawingDrag(canvas, event, indicatorId, point, {
+          drawing: nearest,
+          type: "text"
+        });
+        return;
+      }
+
       renderIndicatorChartCanvas(data, history, indicatorId);
     };
 
@@ -5513,9 +5818,23 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
         canvas.style.cursor = "ns-resize";
       } else if (nearest?.type === "trend") {
         canvas.style.cursor = "grab";
+      } else if (nearest?.type === "text") {
+        canvas.style.cursor = "move";
       } else {
         canvas.style.cursor = "default";
       }
+    };
+
+    canvas.ondblclick = event => {
+      const currentState = readIndicatorChartState(data);
+      if (currentState.mode !== "select") return;
+      const point = chartPointFromPointer(canvas, event);
+      if (!point) return;
+      const nearest = findNearestIndicatorDrawing(point, 4);
+      if (nearest?.type !== "text") return;
+      event.preventDefault();
+      INDICATOR_CHART_SELECTED_DRAWING_ID = nearest.id;
+      openIndicatorTextEditor(indicatorId, { drawingId: nearest.id });
     };
 
     canvas.onpointerup = event => {
@@ -5550,6 +5869,10 @@ function setupIndicatorChartHandlers(data, history, indicatorId) {
     document.addEventListener("keydown", event => {
       if (!$("chartView")?.classList.contains("active")) return;
       if (event.key === "Escape") {
+        if (INDICATOR_CHART_TEXT_EDITOR_STATE) {
+          closeIndicatorTextEditor();
+          return;
+        }
         if (INDICATOR_CHART_DRAG_STATE) finishIndicatorDrawingDrag(false);
         INDICATOR_CHART_PENDING_POINT = null;
         const chartState = readIndicatorChartState(APP_VIEW_DATA);
