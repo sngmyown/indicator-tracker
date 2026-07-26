@@ -495,6 +495,212 @@ tr:last-child td { border-bottom: 0; }
 }
 
 
+/* v6: 차트 텍스트 박스 작도 */
+.indicator-text-color-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.indicator-text-color-controls > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.indicator-text-color-controls > small {
+  color: rgba(238, 243, 255, 0.52);
+  font-size: 11px;
+}
+
+.indicator-text-color-palette,
+.indicator-text-editor-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.indicator-text-color-palette button,
+.indicator-text-editor-palette button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.055);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.indicator-text-color-palette button i,
+.indicator-text-editor-palette button i {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+}
+
+.indicator-text-color-palette button.active,
+.indicator-text-editor-palette button.active {
+  color: #ffffff;
+  border-color: rgba(142, 197, 255, 0.65);
+  background: rgba(142, 197, 255, 0.14);
+  box-shadow: 0 0 0 2px rgba(142, 197, 255, 0.10);
+}
+
+body.indicator-text-editor-open {
+  overflow: hidden;
+}
+
+.indicator-text-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 10020;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(2, 6, 16, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.indicator-text-editor-panel {
+  width: min(760px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid rgba(142, 197, 255, 0.30);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(17, 24, 43, 0.99), rgba(8, 13, 27, 0.99));
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.62);
+}
+
+.indicator-text-editor-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.indicator-text-editor-head h3 {
+  margin-bottom: 5px;
+  font-size: 21px;
+}
+
+.indicator-text-editor-head p {
+  margin-bottom: 0;
+}
+
+#closeIndicatorTextEditor {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 50%;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  font-size: 28px;
+  line-height: 1;
+}
+
+#indicatorTextEditorInput {
+  width: 100%;
+  min-height: 190px;
+  resize: vertical;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  color: var(--text);
+  background: rgba(6, 9, 20, 0.88);
+  font: inherit;
+  line-height: 1.65;
+}
+
+#indicatorTextEditorInput:focus {
+  outline: none;
+  border-color: rgba(142, 197, 255, 0.58);
+  box-shadow: 0 0 0 3px rgba(142, 197, 255, 0.12);
+}
+
+.indicator-text-editor-colors {
+  display: grid;
+  gap: 8px;
+}
+
+.indicator-text-editor-colors > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.indicator-text-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.indicator-text-editor-actions button {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+  font-weight: 850;
+}
+
+#saveIndicatorTextEditor {
+  border-color: rgba(142, 197, 255, 0.42);
+  background: rgba(142, 197, 255, 0.16);
+}
+
+@media (max-width: 720px) {
+  .indicator-text-color-controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .indicator-text-color-palette button,
+  .indicator-text-editor-palette button {
+    flex: 1 1 calc(33.333% - 6px);
+    justify-content: center;
+  }
+
+  .indicator-text-editor {
+    padding: 0;
+  }
+
+  .indicator-text-editor-panel {
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+    border-radius: 0;
+    padding: 16px;
+  }
+
+  #indicatorTextEditorInput {
+    min-height: 38vh;
+  }
+
+  .indicator-text-editor-actions button {
+    flex: 1 1 0;
+  }
+}
+
+
 /* v4: 넓은 수동 메모 입력 */
 .manual-note-label {
   display: block;
